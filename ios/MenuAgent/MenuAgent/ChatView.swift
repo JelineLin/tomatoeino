@@ -8,6 +8,9 @@ final class ChatViewModel: ObservableObject {
     @Published var isSending: Bool = false
 
     private let api = APIClient()
+    // 会话钥匙（L2）：后端每轮流末尾发回，下一轮带上可命中服务端的全保真历史。
+    // 只存内存——App 重启丢了也没关系，messages 全量重发会自动降级 L1 再开新会话。
+    private var sessionID = ""
 
     func send() async {
         let text = input.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -23,12 +26,14 @@ final class ChatViewModel: ObservableObject {
         let assistantIndex = messages.count - 1
 
         do {
-            for try await event in api.streamChat(messages: history) {
+            for try await event in api.streamChat(messages: history, sessionID: sessionID) {
                 switch event {
                 case .thinking(let t): messages[assistantIndex].thinking += t
                 case .answer(let t): messages[assistantIndex].text += t
                 // 工具备忘：流末尾整体到一次，存到这条助手消息上，下一轮随历史带回。
                 case .context(let t): messages[assistantIndex].context = t
+                // 会话钥匙：存下，下一轮带回（后端可能换新——过期重开时以最新的为准）。
+                case .session(let id): sessionID = id
                 }
             }
         } catch {
@@ -80,8 +85,11 @@ struct ChatView: View {
     // 比一行灰字「问问xxx吧」的转化率高得多，第一次打开就知道这 app 能干嘛。
     private var emptyState: some View {
         VStack(spacing: 18) {
-            Text("🍅")
+            // 用 SF Symbol 而非 emoji：部分新装模拟器的 emoji 字体缓存未就绪会渲染成豆腐块，
+            // 系统符号没有这个问题，且跟随主题色。
+            Image(systemName: "fork.knife.circle.fill")
                 .font(.system(size: 56))
+                .foregroundStyle(.orange)
             Text("今天吃点啥？")
                 .font(.title3.bold())
             Text("我会先翻宝宝的吃饭历史和时令表，再给建议")

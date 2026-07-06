@@ -45,11 +45,13 @@ struct APIClient {
 
     // streamChat 把整段对话历史发给 /api/chat，返回一个事件异步序列。
     //
-    // 协议（和后端 cmd/server 对齐）：每行 `data: {"type":"thinking|answer|context","text":"..."}`，
+    // 协议（和后端 cmd/server 对齐）：每行 `data: {"type":"thinking|answer|context|session","text":"..."}`，
     // 收到 `[DONE]` 结束，收到 `[ERROR]...` 抛错。
     // thinking 是过程（模型推理 + 工具轨迹），answer 是最终答案——两条轨道连续下发；
-    // context 是流末尾发一次的「工具备忘」，存到消息上、下一轮随历史带回（L1 轨迹回灌）。
-    func streamChat(messages: [ChatMessage]) -> AsyncThrowingStream<ChatStreamEvent, Error> {
+    // context 是流末尾发一次的「工具备忘」（L1 轨迹回灌）；
+    // session 是流末尾发一次的「会话钥匙」（L2）——下一轮带回，后端直接用它存的
+    // 全保真历史（含真实工具消息）。messages 仍然全量带：会话过期/后端重启时自动降级 L1。
+    func streamChat(messages: [ChatMessage], sessionID: String = "") -> AsyncThrowingStream<ChatStreamEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
@@ -58,13 +60,16 @@ struct APIClient {
                     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
                     request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
 
-                    let payload = ChatRequest(messages: messages.map {
-                        ChatRequest.Message(
-                            role: $0.role.rawValue,
-                            content: $0.text,
-                            context: $0.context.isEmpty ? nil : $0.context
-                        )
-                    })
+                    let payload = ChatRequest(
+                        session_id: sessionID.isEmpty ? nil : sessionID,
+                        messages: messages.map {
+                            ChatRequest.Message(
+                                role: $0.role.rawValue,
+                                content: $0.text,
+                                context: $0.context.isEmpty ? nil : $0.context
+                            )
+                        }
+                    )
                     request.httpBody = try JSONEncoder().encode(payload)
 
                     let (bytes, response) = try await URLSession.shared.bytes(for: request)
@@ -85,6 +90,7 @@ struct APIClient {
                             switch ev.type {
                             case "thinking": continuation.yield(.thinking(ev.text))
                             case "context": continuation.yield(.context(ev.text))
+                            case "session": continuation.yield(.session(ev.text))
                             default: continuation.yield(.answer(ev.text))
                             }
                         }
@@ -115,6 +121,8 @@ struct APIClient {
             // 工具备忘（L1 轨迹回灌）：nil 时 JSONEncoder 自动省略该字段。
             let context: String?
         }
+        // 会话钥匙（L2）：nil 时省略，后端视作新会话/L1 全量模式。
+        let session_id: String?
         let messages: [Message]
     }
 
@@ -125,11 +133,12 @@ struct APIClient {
     }
 }
 
-// ChatStreamEvent 是流式对话吐给 UI 的一个增量：过程、答案，或流末尾的工具备忘。
+// ChatStreamEvent 是流式对话吐给 UI 的一个增量：过程、答案，或流末尾的备忘/会话钥匙。
 enum ChatStreamEvent {
     case thinking(String)
     case answer(String)
     case context(String)
+    case session(String)
 }
 
 enum APIError: LocalizedError {
