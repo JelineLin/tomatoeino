@@ -16,10 +16,16 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"sync"
+	"syscall"
+	"time"
 
 	"github.com/cloudwego/eino/flow/agent/react"
 	"github.com/cloudwego/eino/schema"
@@ -38,10 +44,8 @@ type server struct {
 }
 
 func main() {
-	ctx := context.Background()
-
-	historyPath := envOr("HISTORY_PATH", defaultHistoryPath)
-	agent, days, err := menu.BuildAgent(ctx, historyPath)
+	// 装配 agent 用一个独立的启动 ctx；服务运行期的取消由下面的信号驱动，两者互不影响。
+	agent, days, err := menu.BuildAgent(context.Background(), envOr("HISTORY_PATH", defaultHistoryPath))
 	if err != nil {
 		log.Fatalf("装配 agent 失败: %v", err)
 	}
@@ -53,10 +57,36 @@ func main() {
 	mux.HandleFunc("/api/history", srv.handleHistory)
 	mux.HandleFunc("/api/chat", srv.handleChat)
 
-	addr := ":" + envOr("PORT", "8080")
-	log.Printf("备餐 agent 后端启动于 %s（已加载历史 %d 天）", addr, len(days))
-	if err := http.ListenAndServe(addr, withCORS(mux)); err != nil {
-		log.Fatal(err)
+	httpServer := &http.Server{
+		Addr:    ":" + envOr("PORT", "8080"),
+		Handler: withCORS(mux),
+		// 只限「读完请求头」的时间，挡掉 slowloris（把连接吊着迟迟不发完头）。
+		// 故意不设 WriteTimeout——SSE 是长连接，设了会把正常的流式回答拦腰截断。
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	// 收到 Ctrl-C / SIGTERM 时 ctx.Done() 触发，进入优雅关闭。
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// ListenAndServe 阻塞，扔进 goroutine；主协程去等信号。
+	go func() {
+		log.Printf("备餐 agent 后端启动于 %s（已加载历史 %d 天）", httpServer.Addr, len(days))
+		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("HTTP 服务异常退出: %v", err)
+		}
+	}()
+
+	<-ctx.Done()
+	stop() // 恢复默认信号处理：万一关闭卡住，再按一次 Ctrl-C 能强杀。
+	log.Println("收到关闭信号，开始优雅关闭（最多等 10s 让在途的 SSE 请求收尾）…")
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		log.Printf("优雅关闭超时/出错: %v", err)
+	} else {
+		log.Println("已优雅关闭。")
 	}
 }
 
@@ -87,11 +117,27 @@ type chatMessage struct {
 	Content string `json:"content"`
 }
 
-// handleChat 跑 agent.Stream，把每个 token 按 SSE 吐给前端。
+// sseEvent 是发给前端的一个增量片段。
+//
+// 两类：thinking 是「过程」（思考模型的 reasoning + 工具调用轨迹），answer 是「结论」。
+// 分开发的意义在于：前端可以把过程渲染成灰色可折叠区，答案照常进气泡——
+// 用户在 agent 查工具的空窗期也能看到它在干什么，而不是对着「…」干等。
+type sseEvent struct {
+	Type string `json:"type"` // "thinking" | "answer"
+	Text string `json:"text"`
+}
+
+// handleChat 跑 agent.Stream，把思考过程和答案按 SSE 连续吐给前端。
+//
+// 数据有两个来源，各自一个 goroutine 生产，汇到一个 channel 后由本函数单线程写出
+// （http.ResponseWriter 不能并发写）：
+//   - MessageFuture：agent 每一步的消息流——中间轮的 reasoning、工具调用参数、
+//     工具返回结果，都从这里拿，作为 thinking 事件；
+//   - agent.Stream 的主流：只含最终答案轮，作为 answer 事件。
+//     中间轮的 Content 故意不转发，避免和主流重复。
 //
 // SSE 协议约定（和 iOS 端 APIClient 对齐）：
-//   - 每个增量片段一行：data: <JSON 字符串>\n\n   —— token 用 JSON 编码，
-//     这样含换行/引号也安全（SSE 的 data 字段本身不能直接带裸换行）。
+//   - 每个片段一行：data: {"type":"thinking|answer","text":"..."}\n\n
 //   - 结束：data: [DONE]\n\n
 //   - 出错：data: [ERROR]<说明>\n\n  然后照常补一个 [DONE]
 func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
@@ -100,15 +146,19 @@ func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 给请求体设 1MB 上限：对话历史再长也到不了这个量级，挡掉异常/恶意的超大 body。
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+
 	var req chatRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "请求体不是合法 JSON: "+err.Error(), http.StatusBadRequest)
+		http.Error(w, "请求体不是合法 JSON（或超过 1MB）: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 	if len(req.Messages) == 0 {
 		http.Error(w, "messages 不能为空", http.StatusBadRequest)
 		return
 	}
+	log.Printf("/api/chat：收到 %d 条消息，开始跑 agent", len(req.Messages))
 
 	// SSE 需要能逐块 flush；拿不到 Flusher 说明这个 ResponseWriter 不支持流式。
 	flusher, ok := w.(http.Flusher)
@@ -124,7 +174,11 @@ func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	// 用请求的 context：前端断开连接时，agent 这边能一起取消，不空转。
 	ctx := r.Context()
-	stream, err := s.agent.Stream(ctx, toEinoMessages(req.Messages))
+
+	// WithMessageFuture 让 agent 把每一步产生的消息（含中间轮）异步交给 future，
+	// 主流照旧只吐最终答案。两者共用同一次运行，不会让模型跑两遍。
+	opt, future := react.WithMessageFuture()
+	stream, err := s.agent.Stream(ctx, toEinoMessages(req.Messages), opt)
 	if err != nil {
 		writeSSEError(w, flusher, "启动失败: "+err.Error())
 		writeSSEDone(w, flusher)
@@ -132,21 +186,109 @@ func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	defer stream.Close() // StreamReader 必须 Close，否则可能泄漏底层连接/goroutine
 
-	for {
-		chunk, err := stream.Recv()
-		if err == io.EOF {
-			break // 流正常结束
+	// 事件汇聚 channel。带缓冲：生产侧（模型/工具）和消费侧（网络写出）速度不一致，
+	// 缓冲让两边不必锁步——和撮合系统里下游写盘慢不该拖住行情接收是一个道理。
+	events := make(chan sseEvent, 64)
+	var wg sync.WaitGroup
+
+	// 生产者 1：思考侧。中间轮的 reasoning / 工具轨迹 → thinking 事件。
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		forwardThinking(future, events)
+	}()
+
+	// 生产者 2：答案侧。主流的 Content → answer 事件。
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			chunk, err := stream.Recv()
+			if err == io.EOF {
+				return
+			}
+			if err != nil {
+				events <- sseEvent{Type: "error", Text: err.Error()}
+				return
+			}
+			if chunk.Content != "" {
+				events <- sseEvent{Type: "answer", Text: chunk.Content}
+			}
 		}
-		if err != nil {
-			writeSSEError(w, flusher, err.Error())
-			break
+	}()
+
+	// 两个生产者都收工后关 channel，让下面的写出循环自然退出。
+	go func() {
+		wg.Wait()
+		close(events)
+	}()
+
+	for ev := range events {
+		if ev.Type == "error" {
+			writeSSEError(w, flusher, ev.Text)
+			continue
 		}
-		if chunk.Content == "" {
-			continue // 工具调用等中间块可能没有文本内容，跳过
-		}
-		writeSSEToken(w, flusher, chunk.Content)
+		writeSSEEvent(w, flusher, ev)
 	}
 	writeSSEDone(w, flusher)
+}
+
+// forwardThinking 把 agent 中间步骤转成 thinking 事件。
+//
+// future 交出来的是「每一步一个消息流」：模型轮（可能带 reasoning 和工具调用）
+// 或工具结果。reasoning 逐 chunk 直转（这是「连续返回」的关键——思考模型的
+// 推理文本边生成边下发）；工具调用参数是分片流式的，拼完整再发一行摘要。
+func forwardThinking(future react.MessageFuture, events chan<- sseEvent) {
+	iter := future.GetMessageStreams()
+	for {
+		ms, ok, err := iter.Next()
+		if err != nil {
+			return // 运行错误由答案侧上报，这里安静退出即可
+		}
+		if !ok {
+			return // 所有步骤都交付完了
+		}
+		forwardStep(ms, events)
+	}
+}
+
+// forwardStep 消费一步的消息流。
+func forwardStep(ms *schema.StreamReader[*schema.Message], events chan<- sseEvent) {
+	defer ms.Close()
+
+	var chunks []*schema.Message
+	for {
+		m, err := ms.Recv()
+		if err != nil {
+			break // io.EOF 或错误都停止收集；错误由答案侧上报
+		}
+		// 思考模型的推理内容：边收边转发，保持打字机的连续感。
+		if m.ReasoningContent != "" {
+			events <- sseEvent{Type: "thinking", Text: m.ReasoningContent}
+		}
+		chunks = append(chunks, m)
+	}
+
+	// 拼回完整消息，提取需要「攒齐了才有意义」的部分（工具名 + 完整参数）。
+	full, err := schema.ConcatMessages(chunks)
+	if err != nil || full == nil {
+		return
+	}
+	switch full.Role {
+	case schema.Tool:
+		// 工具结果原文可能很长（一堆 JSON），前端只需要知道「查到了」，给个摘要。
+		events <- sseEvent{
+			Type: "thinking",
+			Text: fmt.Sprintf("✅ %s 返回了 %d 字\n", full.ToolName, len([]rune(full.Content))),
+		}
+	case schema.Assistant:
+		for _, tc := range full.ToolCalls {
+			events <- sseEvent{
+				Type: "thinking",
+				Text: fmt.Sprintf("🔧 调用 %s %s\n", tc.Function.Name, tc.Function.Arguments),
+			}
+		}
+	}
 }
 
 // toEinoMessages 把前端消息转成 eino 的 []*schema.Message。
@@ -163,8 +305,8 @@ func toEinoMessages(in []chatMessage) []*schema.Message {
 	return out
 }
 
-func writeSSEToken(w io.Writer, f http.Flusher, token string) {
-	b, _ := json.Marshal(token) // 编成 JSON 字符串，含换行/引号也安全
+func writeSSEEvent(w io.Writer, f http.Flusher, ev sseEvent) {
+	b, _ := json.Marshal(ev) // 编成 JSON，text 含换行/引号也安全
 	_, _ = io.WriteString(w, "data: "+string(b)+"\n\n")
 	f.Flush()
 }

@@ -3,6 +3,7 @@ package menu
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/cloudwego/eino/components/retriever"
@@ -72,6 +73,7 @@ type searchInput struct {
 func makeSearch(store *vectorstore.Store) func(context.Context, searchInput) (string, error) {
 	return func(ctx context.Context, in searchInput) (string, error) {
 		q := strings.TrimSpace(in.Query)
+		log.Printf("🔧 search_meal_history(query=%q)", q)
 		if q == "" {
 			return "查询为空，请给一句描述想找什么样的餐。", nil
 		}
@@ -106,6 +108,7 @@ func makeRecent(days []Day) func(context.Context, recentInput) (string, error) {
 		if n > len(days) {
 			n = len(days)
 		}
+		log.Printf("🔧 recent_meals(days=%d)", n)
 		if n == 0 {
 			return "历史为空。", nil
 		}
@@ -128,6 +131,7 @@ type ingredientInput struct {
 func makeFindByIngredient(days []Day) func(context.Context, ingredientInput) (string, error) {
 	return func(ctx context.Context, in ingredientInput) (string, error) {
 		kw := strings.TrimSpace(in.Ingredient)
+		log.Printf("🔧 find_by_ingredient(ingredient=%q)", kw)
 		if kw == "" {
 			return "请给一个要查找的食材或关键词。", nil
 		}

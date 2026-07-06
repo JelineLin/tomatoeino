@@ -1,4 +1,5 @@
 // 历史界面：拉 /api/history，按天列出 午餐/水果/晚餐 → 每道菜的名字 + 做法明细。
+// 支持两种展示：列表（按天倒序翻）和日历（月历表格，见 CalendarHistoryView）。
 import SwiftUI
 
 @MainActor
@@ -23,7 +24,14 @@ final class HistoryViewModel: ObservableObject {
 }
 
 struct HistoryView: View {
+    // 展示模式。列表适合连续翻最近几天，日历适合按月定位「某天吃了啥」。
+    private enum Mode: String, CaseIterable {
+        case list = "列表"
+        case calendar = "日历"
+    }
+
     @StateObject private var vm = HistoryViewModel()
+    @State private var mode: Mode = .list
 
     var body: some View {
         NavigationStack {
@@ -45,15 +53,29 @@ struct HistoryView: View {
                     }
                     .padding()
                 } else {
-                    list
+                    switch mode {
+                    case .list: list
+                    case .calendar: CalendarHistoryView(days: vm.days)
+                    }
                 }
             }
             .navigationTitle("吃饭历史")
             .toolbar {
-                Button {
-                    Task { await vm.load() }
-                } label: {
-                    Image(systemName: "arrow.clockwise")
+                ToolbarItem(placement: .principal) {
+                    Picker("展示方式", selection: $mode) {
+                        ForEach(Mode.allCases, id: \.self) { m in
+                            Text(m.rawValue).tag(m)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 160)
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        Task { await vm.load() }
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
                 }
             }
         }
@@ -65,38 +87,13 @@ struct HistoryView: View {
     private var list: some View {
         List(vm.days) { day in
             Section(day.date) {
-                mealRow(label: "午餐", meal: day.lunch)
-                mealRow(label: "水果", meal: day.fruit)
-                mealRow(label: "晚餐", meal: day.dinner)
+                // 一餐的具体渲染在 MealRowView（CalendarHistoryView.swift），列表和日历共用。
+                MealRowView(label: "午餐", meal: day.lunch)
+                MealRowView(label: "水果", meal: day.fruit)
+                MealRowView(label: "晚餐", meal: day.dinner)
             }
         }
         .listStyle(.insetGrouped)
         .refreshable { await vm.load() }
-    }
-
-    // mealRow 渲染一餐；这一餐缺席（nil）时不显示。
-    @ViewBuilder
-    private func mealRow(label: String, meal: Meal?) -> some View {
-        if let meal, !meal.dishes.isEmpty {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack {
-                    Text(label).font(.headline)
-                    if !meal.time.isEmpty {
-                        Text(meal.time).font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-                ForEach(meal.dishes, id: \.self) { dish in
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("· \(dish.name)")
-                        if !dish.detail.isEmpty {
-                            Text(dish.detail)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
-            }
-            .padding(.vertical, 4)
-        }
     }
 }

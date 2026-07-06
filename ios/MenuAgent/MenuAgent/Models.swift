@@ -26,7 +26,7 @@ struct Dish: Codable, Hashable {
     let detail: String
 }
 
-// ChatMessage 是聊天界面里的一条消息。text 设计成 var，
+// ChatMessage 是聊天界面里的一条消息。text/thinking 设计成 var，
 // 因为助手回复是流式的——边收 token 边往同一条消息里追加。
 struct ChatMessage: Identifiable {
     enum Role: String {
@@ -37,4 +37,6 @@ struct ChatMessage: Identifiable {
     let id = UUID()
     let role: Role
     var text: String
+    // 思考过程（模型推理 + 工具调用轨迹）。只有助手消息才有；发给后端的历史里不带它。
+    var thinking: String = ""
 }

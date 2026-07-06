@@ -21,11 +21,12 @@ struct APIClient {
 
     // MARK: - 流式对话
 
-    // streamChat 把整段对话历史发给 /api/chat，返回一个 token 异步序列。
+    // streamChat 把整段对话历史发给 /api/chat，返回一个事件异步序列。
     //
-    // 协议（和后端 cmd/server 对齐）：每行 `data: <JSON 字符串>`，
-    // 收到 `[DONE]` 结束，收到 `[ERROR]...` 抛错。token 用 JSON 编码所以含换行也安全。
-    func streamChat(messages: [ChatMessage]) -> AsyncThrowingStream<String, Error> {
+    // 协议（和后端 cmd/server 对齐）：每行 `data: {"type":"thinking|answer","text":"..."}`，
+    // 收到 `[DONE]` 结束，收到 `[ERROR]...` 抛错。
+    // thinking 是过程（模型推理 + 工具轨迹），answer 是最终答案——两条轨道连续下发。
+    func streamChat(messages: [ChatMessage]) -> AsyncThrowingStream<ChatStreamEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
@@ -51,10 +52,10 @@ struct APIClient {
                             let msg = String(payload.dropFirst("[ERROR]".count))
                             throw APIError.server(msg)
                         }
-                        // payload 是 JSON 编码的字符串 token，解出来再吐给 UI。
+                        // payload 是 JSON 事件对象，按 type 分流给 UI。
                         if let data = payload.data(using: .utf8),
-                           let token = try? JSONDecoder().decode(String.self, from: data) {
-                            continuation.yield(token)
+                           let ev = try? JSONDecoder().decode(WireEvent.self, from: data) {
+                            continuation.yield(ev.type == "thinking" ? .thinking(ev.text) : .answer(ev.text))
                         }
                     }
                     continuation.finish()
@@ -83,6 +84,18 @@ struct APIClient {
         }
         let messages: [Message]
     }
+
+    // 后端 SSE 事件的线上格式。
+    private struct WireEvent: Decodable {
+        let type: String
+        let text: String
+    }
+}
+
+// ChatStreamEvent 是流式对话吐给 UI 的一个增量：过程 or 答案。
+enum ChatStreamEvent {
+    case thinking(String)
+    case answer(String)
 }
 
 enum APIError: LocalizedError {
