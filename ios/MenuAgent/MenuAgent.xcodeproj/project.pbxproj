@@ -14,6 +14,7 @@
 		1A1100000000000000000024 /* HistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A1100000000000000000014 /* HistoryView.swift */; };
 		1A1100000000000000000025 /* CalendarHistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A1100000000000000000016 /* CalendarHistoryView.swift */; };
 		1A1100000000000000000026 /* MarkdownTextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A1100000000000000000017 /* MarkdownTextView.swift */; };
+		1A1100000000000000000027 /* SeasonalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A1100000000000000000018 /* SeasonalView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -26,6 +27,7 @@
 		1A1100000000000000000015 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		1A1100000000000000000016 /* CalendarHistoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CalendarHistoryView.swift; sourceTree = "<group>"; };
 		1A1100000000000000000017 /* MarkdownTextView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownTextView.swift; sourceTree = "<group>"; };
+		1A1100000000000000000018 /* SeasonalView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SeasonalView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -57,6 +59,7 @@
 				1A1100000000000000000014 /* HistoryView.swift */,
 				1A1100000000000000000016 /* CalendarHistoryView.swift */,
 				1A1100000000000000000017 /* MarkdownTextView.swift */,
+				1A1100000000000000000018 /* SeasonalView.swift */,
 				1A1100000000000000000015 /* Info.plist */,
 			);
 			path = MenuAgent;
@@ -145,6 +148,7 @@
 				1A1100000000000000000024 /* HistoryView.swift in Sources */,
 				1A1100000000000000000025 /* CalendarHistoryView.swift in Sources */,
 				1A1100000000000000000026 /* MarkdownTextView.swift in Sources */,
+				1A1100000000000000000027 /* SeasonalView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -203,6 +207,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = L7M693XF47;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = MenuAgent/Info.plist;
@@ -211,7 +216,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.tomatoeino.MenuAgent;
+				PRODUCT_BUNDLE_IDENTIFIER = com.tomatoeino.MenuAgent.jeline.monday;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
@@ -225,6 +230,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = L7M693XF47;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = MenuAgent/Info.plist;
@@ -233,7 +239,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.tomatoeino.MenuAgent;
+				PRODUCT_BUNDLE_IDENTIFIER = com.tomatoeino.MenuAgent.jeline.monday;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;

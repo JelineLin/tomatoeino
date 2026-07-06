@@ -9,3 +9,6 @@ ios/**/build/
 ios/**/DerivedData/
 ios/**/xcuserdata/
 ios/**/*.xcuserstate
+
+# macOS
+.DS_Store

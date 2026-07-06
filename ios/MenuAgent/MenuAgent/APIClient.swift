@@ -6,9 +6,14 @@
 import Foundation
 
 struct APIClient {
-    // 后端地址。模拟器跑时 localhost 指向 Mac 本机，直接连本地 go run 的服务即可。
-    // 真机调试时改成 Mac 的局域网 IP（如 http://192.168.1.10:8080）。
+    // 后端地址。模拟器和 Mac 是同一台机器，走 localhost；
+    // 真机和 Mac 不是一台机器，得走 Mac 的局域网 IP（手机和 Mac 需在同一 Wi-Fi）。
+    // 编译期按目标环境二选一——IP 变了只需改下面这一处（Mac 上查：ipconfig getifaddr en0）。
+    #if targetEnvironment(simulator)
     var baseURL = URL(string: "http://localhost:8080")!
+    #else
+    var baseURL = URL(string: "http://192.168.1.24:8080")!
+    #endif
 
     // MARK: - 历史
 
@@ -17,6 +22,23 @@ struct APIClient {
         let (data, response) = try await URLSession.shared.data(from: url)
         try Self.checkOK(response)
         return try JSONDecoder().decode([Day].self, from: data)
+    }
+
+    // MARK: - 时令
+
+    // fetchSeasonal 查某个月的应季食材。month 传 nil 表示当前月（由后端定，
+    // 客户端不自己算「现在几月」，和后端 seasonal_produce 工具保持同一个时钟口径）。
+    func fetchSeasonal(month: Int? = nil) async throws -> Season {
+        var components = URLComponents(
+            url: baseURL.appendingPathComponent("api/seasonal"),
+            resolvingAgainstBaseURL: false
+        )!
+        if let month {
+            components.queryItems = [URLQueryItem(name: "month", value: String(month))]
+        }
+        let (data, response) = try await URLSession.shared.data(from: components.url!)
+        try Self.checkOK(response)
+        return try JSONDecoder().decode(Season.self, from: data)
     }
 
     // MARK: - 流式对话

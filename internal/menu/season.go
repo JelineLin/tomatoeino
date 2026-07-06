@@ -99,6 +99,30 @@ var seasonTable = map[time.Month]seasonEntry{
 	},
 }
 
+// Season 是一个月的时令清单的对外形态（JSON 字段小写，直接喂给 HTTP 层）。
+// seasonEntry 是包内存储格式，这里是给前端的「报文格式」——两者分开，
+// 以后表结构怎么改，对外契约不动。
+type Season struct {
+	Month   int      `json:"month"`
+	Veg     []string `json:"veg"`
+	Fruit   []string `json:"fruit"`
+	Aquatic []string `json:"aquatic"`
+	Tip     string   `json:"tip"`
+}
+
+// SeasonFor 返回某个月的时令清单。工具走 renderSeason（人话给模型），
+// HTTP 端点走这里（结构化给前端），同一张表两个出口。
+func SeasonFor(m time.Month) Season {
+	e := seasonTable[m]
+	return Season{
+		Month:   int(m),
+		Veg:     e.Veg,
+		Fruit:   e.Fruit,
+		Aquatic: e.Aquatic,
+		Tip:     e.Tip,
+	}
+}
+
 // renderSeason 把一个月的时令条目渲染成模型读得懂的人话。
 func renderSeason(m time.Month, e seasonEntry) string {
 	var b strings.Builder

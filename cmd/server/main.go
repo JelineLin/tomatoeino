@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -55,6 +56,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", srv.handleHealth)
 	mux.HandleFunc("/api/history", srv.handleHistory)
+	mux.HandleFunc("/api/seasonal", srv.handleSeasonal)
 	mux.HandleFunc("/api/chat", srv.handleChat)
 
 	httpServer := &http.Server{
@@ -104,6 +106,29 @@ func (s *server) handleHistory(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	if err := json.NewEncoder(w).Encode(s.days); err != nil {
 		log.Printf("/api/history 编码失败: %v", err)
+	}
+}
+
+// handleSeasonal 返回某个月的时令清单，给前端「时令」tab 用。
+// ?month=1..12 指定月份，不传默认当前月。数据和 agent 的 seasonal_produce
+// 工具同源（menu.SeasonFor），一张表两个出口，不会出现两边说法不一致。
+func (s *server) handleSeasonal(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "只支持 GET", http.StatusMethodNotAllowed)
+		return
+	}
+	m := int(time.Now().Month())
+	if q := r.URL.Query().Get("month"); q != "" {
+		n, err := strconv.Atoi(q)
+		if err != nil || n < 1 || n > 12 {
+			http.Error(w, "month 必须是 1~12", http.StatusBadRequest)
+			return
+		}
+		m = n
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if err := json.NewEncoder(w).Encode(menu.SeasonFor(time.Month(m))); err != nil {
+		log.Printf("/api/seasonal 编码失败: %v", err)
 	}
 }
 

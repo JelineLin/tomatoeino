@@ -26,6 +26,15 @@ struct Dish: Codable, Hashable {
     let detail: String
 }
 
+// Season 是某个月的时令清单，对应后端 /api/seasonal 的 JSON。
+struct Season: Codable {
+    let month: Int
+    let veg: [String]
+    let fruit: [String]
+    let aquatic: [String]
+    let tip: String
+}
+
 // ChatMessage 是聊天界面里的一条消息。text/thinking 设计成 var，
 // 因为助手回复是流式的——边收 token 边往同一条消息里追加。
 struct ChatMessage: Identifiable {
