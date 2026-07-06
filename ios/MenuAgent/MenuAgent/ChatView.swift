@@ -27,6 +27,8 @@ final class ChatViewModel: ObservableObject {
                 switch event {
                 case .thinking(let t): messages[assistantIndex].thinking += t
                 case .answer(let t): messages[assistantIndex].text += t
+                // 工具备忘：流末尾整体到一次，存到这条助手消息上，下一轮随历史带回。
+                case .context(let t): messages[assistantIndex].context = t
                 }
             }
         } catch {
@@ -56,9 +58,7 @@ struct ChatView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 12) {
                     if vm.messages.isEmpty {
-                        Text("问问「最近吃了啥」「明天晚饭别重样」「上次鳕鱼怎么做的」吧～")
-                            .foregroundStyle(.secondary)
-                            .padding()
+                        emptyState
                     }
                     ForEach(vm.messages) { msg in
                         MessageBubble(message: msg)
@@ -76,22 +76,79 @@ struct ChatView: View {
         }
     }
 
+    // 空态：一句引导 + 三个可直接点的示例问题，点了立刻发送——
+    // 比一行灰字「问问xxx吧」的转化率高得多，第一次打开就知道这 app 能干嘛。
+    private var emptyState: some View {
+        VStack(spacing: 18) {
+            Text("🍅")
+                .font(.system(size: 56))
+            Text("今天吃点啥？")
+                .font(.title3.bold())
+            Text("我会先翻宝宝的吃饭历史和时令表，再给建议")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            VStack(spacing: 8) {
+                suggestionChip("最近三天吃了啥？")
+                suggestionChip("明天三餐帮我配一下，别和最近重样")
+                suggestionChip("这个月应季的水果有哪些？")
+            }
+            .padding(.top, 4)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 48)
+    }
+
+    private func suggestionChip(_ text: String) -> some View {
+        Button {
+            vm.input = text
+            Task { await vm.send() }
+        } label: {
+            Text(text)
+                .font(.callout)
+                .foregroundStyle(.orange)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(Capsule().fill(Color.orange.opacity(0.1)))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var canSend: Bool {
+        !vm.isSending && !vm.input.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
     private var inputBar: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 10) {
             TextField("说点什么…", text: $vm.input, axis: .vertical)
-                .textFieldStyle(.roundedBorder)
                 .lineLimit(1...4)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 9)
+                .background(
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .fill(Color(.secondarySystemBackground))
+                )
                 .onSubmit { Task { await vm.send() } }
 
             Button {
                 Task { await vm.send() }
             } label: {
-                Image(systemName: "arrow.up.circle.fill")
-                    .font(.title)
+                Group {
+                    if vm.isSending {
+                        ProgressView().tint(.white)
+                    } else {
+                        Image(systemName: "arrow.up")
+                            .font(.body.weight(.semibold))
+                            .foregroundStyle(.white)
+                    }
+                }
+                .frame(width: 36, height: 36)
+                .background(Circle().fill(canSend ? Color.orange : Color.gray.opacity(0.35)))
             }
-            .disabled(vm.isSending || vm.input.trimmingCharacters(in: .whitespaces).isEmpty)
+            .disabled(!canSend)
+            .animation(.easeInOut(duration: 0.15), value: canSend)
         }
-        .padding()
+        .padding(.horizontal)
+        .padding(.vertical, 10)
         .background(.bar)
     }
 }
@@ -110,14 +167,30 @@ struct MessageBubble: View {
 
     var body: some View {
         HStack {
-            if isUser { Spacer(minLength: 40) }
+            if isUser { Spacer(minLength: 48) }
             bubbleContent
-                .padding(10)
-                .background(isUser ? Color.accentColor.opacity(0.85) : Color(.secondarySystemBackground))
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(bubbleBackground)
                 .foregroundStyle(isUser ? .white : .primary)
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .shadow(color: .black.opacity(isUser ? 0 : 0.06), radius: 5, y: 2)
                 .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
-            if !isUser { Spacer(minLength: 40) }
+            if !isUser { Spacer(minLength: 48) }
+        }
+    }
+
+    // 用户气泡上暖橙渐变（和全局主色一脉），助手气泡是浅底卡片加淡投影。
+    @ViewBuilder
+    private var bubbleBackground: some View {
+        if isUser {
+            LinearGradient(
+                colors: [Color.orange, Color(red: 0.95, green: 0.45, blue: 0.2)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        } else {
+            Color(.secondarySystemBackground)
         }
     }
 
@@ -133,7 +206,7 @@ struct MessageBubble: View {
                 if !message.text.isEmpty {
                     MarkdownText(text: message.text)
                 } else if message.thinking.isEmpty {
-                    Text("…")
+                    TypingDots()
                 }
             }
             .onChange(of: message.text.isEmpty) { isEmpty in
@@ -146,17 +219,54 @@ struct MessageBubble: View {
 
     private var thinkingSection: some View {
         DisclosureGroup(isExpanded: $thinkingExpanded) {
-            Text(message.thinking)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.top, 4)
+            // 左侧一条橙色细线做「引用」视觉——一眼区分过程和结论。
+            HStack(alignment: .top, spacing: 8) {
+                Capsule()
+                    .fill(Color.orange.opacity(0.45))
+                    .frame(width: 3)
+                Text(message.thinking)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.top, 6)
         } label: {
-            Label(message.text.isEmpty ? "思考中…" : "思考过程",
-                  systemImage: "brain")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            HStack(spacing: 6) {
+                if message.text.isEmpty {
+                    ProgressView()
+                        .controlSize(.mini)
+                    Text("思考中…")
+                } else {
+                    Image(systemName: "brain")
+                    Text("思考过程")
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
         }
         .tint(.secondary)
+    }
+}
+
+// TypingDots 三个小圆点的「对方正在输入」动画——请求刚发出、
+// 思考流还没到达的零点几秒里，比一个静止的「…」更有活着的感觉。
+struct TypingDots: View {
+    @State private var on = false
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(0..<3, id: \.self) { i in
+                Circle()
+                    .frame(width: 6, height: 6)
+                    .opacity(on ? 1 : 0.25)
+                    .animation(
+                        .easeInOut(duration: 0.55).repeatForever().delay(Double(i) * 0.18),
+                        value: on
+                    )
+            }
+        }
+        .foregroundStyle(.secondary)
+        .padding(.vertical, 4)
+        .onAppear { on = true }
     }
 }

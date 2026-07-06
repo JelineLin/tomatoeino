@@ -114,23 +114,32 @@ struct CalendarHistoryView: View {
         let isSelected = selectedDate == dateStr
 
         Button {
-            selectedDate = dateStr
+            withAnimation(.snappy) { selectedDate = dateStr }
         } label: {
-            VStack(spacing: 3) {
-                Text("\(dayNum)")
-                    .font(.callout)
-                    .fontWeight(isSelected ? .bold : .regular)
+            VStack(spacing: 4) {
+                // 选中 = 橙色实心圆 + 白字；今天 = 橙色描边圈；平日裸数字。
+                ZStack {
+                    if isSelected {
+                        Circle().fill(Color.orange).frame(width: 32, height: 32)
+                    } else if dateStr == DateFmt.todayString {
+                        Circle()
+                            .stroke(Color.orange.opacity(0.55), lineWidth: 1.5)
+                            .frame(width: 32, height: 32)
+                    }
+                    Text("\(dayNum)")
+                        .font(.callout)
+                        .fontWeight(isSelected ? .bold : .regular)
+                        .foregroundStyle(
+                            isSelected ? .white
+                                : hasRecord ? Color.primary : Color.secondary.opacity(0.45)
+                        )
+                }
                 // 圆点标记「这天有记录」；没记录的日子点也留白，保持格子等高。
                 Circle()
-                    .fill(hasRecord ? Color.accentColor : .clear)
+                    .fill(hasRecord ? Color.orange : .clear)
                     .frame(width: 5, height: 5)
             }
-            .frame(maxWidth: .infinity, minHeight: 40)
-            .background(
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(isSelected ? Color.accentColor.opacity(0.15) : .clear)
-            )
-            .foregroundStyle(hasRecord ? Color.primary : Color.secondary.opacity(0.5))
+            .frame(maxWidth: .infinity, minHeight: 44)
         }
         .buttonStyle(.plain)
         .disabled(!hasRecord)
@@ -141,10 +150,21 @@ struct CalendarHistoryView: View {
     private var detail: some View {
         if let dateStr = selectedDate, let day = dayByDate[dateStr] {
             VStack(alignment: .leading, spacing: 12) {
-                Text(dateStr).font(.headline)
-                MealRowView(label: "午餐", meal: day.lunch)
-                MealRowView(label: "水果", meal: day.fruit)
-                MealRowView(label: "晚餐", meal: day.dinner)
+                HStack(spacing: 8) {
+                    Text(dateStr).font(.headline)
+                    if let wd = DateFmt.weekdayName(dateStr) {
+                        Text(wd).font(.subheadline).foregroundStyle(.secondary)
+                    }
+                }
+                VStack(alignment: .leading, spacing: 12) {
+                    MealRowView(label: "午餐", meal: day.lunch)
+                    MealRowView(label: "水果", meal: day.fruit)
+                    MealRowView(label: "晚餐", meal: day.dinner)
+                }
+                .padding()
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color(.secondarySystemBackground))
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         } else {
@@ -171,32 +191,75 @@ struct CalendarHistoryView: View {
     }
 }
 
-// 一餐的渲染：标签 + 时间 + 菜品清单。列表和日历两个视图共用，保证两边样式一致。
+// 一餐的渲染：图标 + 标签 + 时间徽章 + 菜品清单。列表和日历两个视图共用，保证两边样式一致。
 struct MealRowView: View {
     let label: String
     let meal: Meal?
 
+    // 每餐一个专属图标和颜色：午餐日头橙、水果叶子绿、晚餐月亮蓝紫——扫一眼就分清。
+    private var style: (icon: String, color: Color) {
+        switch label {
+        case "午餐": return ("sun.max.fill", .orange)
+        case "水果": return ("leaf.fill", .green)
+        case "晚餐": return ("moon.stars.fill", .indigo)
+        default: return ("fork.knife", .gray)
+        }
+    }
+
     var body: some View {
         if let meal, !meal.dishes.isEmpty {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack {
-                    Text(label).font(.headline)
-                    if !meal.time.isEmpty {
-                        Text(meal.time).font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-                ForEach(meal.dishes, id: \.self) { dish in
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("· \(dish.name)")
-                        if !dish.detail.isEmpty {
-                            Text(dish.detail)
-                                .font(.caption)
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: style.icon)
+                    .font(.footnote)
+                    .foregroundStyle(style.color)
+                    .frame(width: 28, height: 28)
+                    .background(Circle().fill(style.color.opacity(0.12)))
+
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(spacing: 6) {
+                        Text(label).font(.subheadline.bold())
+                        if !meal.time.isEmpty {
+                            Text(meal.time)
+                                .font(.caption2)
+                                .monospacedDigit()
                                 .foregroundStyle(.secondary)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Capsule().fill(Color.primary.opacity(0.06)))
+                        }
+                    }
+                    ForEach(meal.dishes, id: \.self) { dish in
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(dish.name).font(.callout)
+                            if !dish.detail.isEmpty {
+                                Text(dish.detail)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                     }
                 }
             }
-            .padding(.vertical, 4)
+            .padding(.vertical, 2)
         }
+    }
+}
+
+// DateFmt 集中放「yyyy-MM-dd 字符串 ↔ 日期」的小工具。
+// DateFormatter 创建很贵，做成静态常量全 app 复用。
+enum DateFmt {
+    static let ymd: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        return f
+    }()
+
+    static var todayString: String { ymd.string(from: .now) }
+
+    // "2025-11-03" → "周一"
+    static func weekdayName(_ s: String) -> String? {
+        guard let d = ymd.date(from: s) else { return nil }
+        let names = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"]
+        return names[Calendar.current.component(.weekday, from: d) - 1]
     }
 }

@@ -3,9 +3,11 @@ package menu
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/flow/agent/react"
+	"github.com/cloudwego/eino/schema"
 
 	"tomatoeino/internal/llm"
 	"tomatoeino/internal/vectorstore"
@@ -24,6 +26,9 @@ const systemPersona = `你是一个「幼儿备餐助手」，帮家长依据宝
   这类过渡语）——直接发起工具调用。只有拿到工具结果后，才开口给答案。
 - 工具：search_meal_history（按语义找相近的餐）、recent_meals（看最近几天吃了啥）、
   find_by_ingredient（按食材精确找）、seasonal_produce（查当月应季食材）。可多次、组合调用。
+- 例外：如果上下文里出现【工具备忘】，那是你上一轮亲自调用工具查到的真实数据——
+  本轮可以直接引用它作答，不必为同样的数据重复调用工具；只有备忘不够回答本轮问题、
+  或数据可能过期时才再调工具。
 - 拿到工具结果后，在**同一轮**里直接给出最终、可照做的推荐/答案，不要停在「正在查」。
 
 推荐原则：
@@ -77,7 +82,15 @@ func BuildAgent(ctx context.Context, historyPath string) (*react.Agent, []Day, e
 	agent, err := react.NewAgent(ctx, &react.AgentConfig{
 		ToolCallingModel: cm,
 		ToolsConfig:      compose.ToolsNodeConfig{Tools: tools},
-		MessageModifier:  react.NewPersonaModifier(systemPersona),
+		// 人设 + 当天日期，每个请求动态注入（而非 NewPersonaModifier 那种建图时写死）。
+		// 为什么日期必须给：模型自己不知道今天几号，不给就瞎猜——实测把
+		// seasonal_produce 的 month 猜成了 4（实际 7 月），还通过工具备忘把错误
+		// 月份的数据传染给下一轮。动态取值也让长驻进程跨月/跨天不会过期。
+		MessageModifier: func(_ context.Context, input []*schema.Message) []*schema.Message {
+			sys := schema.SystemMessage(systemPersona +
+				fmt.Sprintf("\n\n今天是 %s。", time.Now().Format("2006-01-02")))
+			return append([]*schema.Message{sys}, input...)
+		},
 		// MaxStep 限制「思考-调工具」的最大轮数，防止模型陷在工具循环里出不来。
 		MaxStep: 12,
 	})

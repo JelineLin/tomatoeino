@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -140,15 +141,21 @@ type chatRequest struct {
 type chatMessage struct {
 	Role    string `json:"role"` // "user" / "assistant"
 	Content string `json:"content"`
+	// Context 是这条助手消息那一轮的「工具备忘」（L1 轨迹回灌）：
+	// 服务端在流末尾以 context 事件下发，客户端存着、下一轮随历史原样带回，
+	// 服务端把最近一条注入上下文——追问时 agent 不必把同样的数据重查一遍。
+	// 服务端自己不存任何东西，状态由客户端携带，无状态设计不破。
+	Context string `json:"context,omitempty"`
 }
 
 // sseEvent 是发给前端的一个增量片段。
 //
-// 两类：thinking 是「过程」（思考模型的 reasoning + 工具调用轨迹），answer 是「结论」。
+// 三类：thinking 是「过程」（思考模型的 reasoning + 工具调用轨迹），answer 是「结论」，
+// context 是「备忘」（本轮工具轨迹的完整记录，流末尾发一次，供下一轮回灌）。
 // 分开发的意义在于：前端可以把过程渲染成灰色可折叠区，答案照常进气泡——
 // 用户在 agent 查工具的空窗期也能看到它在干什么，而不是对着「…」干等。
 type sseEvent struct {
-	Type string `json:"type"` // "thinking" | "answer"
+	Type string `json:"type"` // "thinking" | "answer" | "context"
 	Text string `json:"text"`
 }
 
@@ -162,7 +169,8 @@ type sseEvent struct {
 //     中间轮的 Content 故意不转发，避免和主流重复。
 //
 // SSE 协议约定（和 iOS 端 APIClient 对齐）：
-//   - 每个片段一行：data: {"type":"thinking|answer","text":"..."}\n\n
+//   - 每个片段一行：data: {"type":"thinking|answer|context","text":"..."}\n\n
+//     （context 只在流末尾发一次，是本轮工具轨迹备忘，客户端下轮带回）
 //   - 结束：data: [DONE]\n\n
 //   - 出错：data: [ERROR]<说明>\n\n  然后照常补一个 [DONE]
 func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
@@ -216,11 +224,14 @@ func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
 	events := make(chan sseEvent, 64)
 	var wg sync.WaitGroup
 
+	// L1 轨迹回灌：备忘收集器。thinking 侧生产者边转发边把工具轨迹存进来。
+	digest := &turnDigest{}
+
 	// 生产者 1：思考侧。中间轮的 reasoning / 工具轨迹 → thinking 事件。
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		forwardThinking(future, events)
+		forwardThinking(future, events, digest)
 	}()
 
 	// 生产者 2：答案侧。主流的 Content → answer 事件。
@@ -255,6 +266,12 @@ func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
 		}
 		writeSSEEvent(w, flusher, ev)
 	}
+
+	// 备忘在 channel 关闭（两个生产者都收工）之后才读，天然无竞态。
+	// 有工具轨迹才发 context 事件——没调工具的轮次没有备忘可回灌。
+	if d := digest.String(); d != "" {
+		writeSSEEvent(w, flusher, sseEvent{Type: "context", Text: d})
+	}
 	writeSSEDone(w, flusher)
 }
 
@@ -263,7 +280,7 @@ func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
 // future 交出来的是「每一步一个消息流」：模型轮（可能带 reasoning 和工具调用）
 // 或工具结果。reasoning 逐 chunk 直转（这是「连续返回」的关键——思考模型的
 // 推理文本边生成边下发）；工具调用参数是分片流式的，拼完整再发一行摘要。
-func forwardThinking(future react.MessageFuture, events chan<- sseEvent) {
+func forwardThinking(future react.MessageFuture, events chan<- sseEvent, digest *turnDigest) {
 	iter := future.GetMessageStreams()
 	for {
 		ms, ok, err := iter.Next()
@@ -273,12 +290,12 @@ func forwardThinking(future react.MessageFuture, events chan<- sseEvent) {
 		if !ok {
 			return // 所有步骤都交付完了
 		}
-		forwardStep(ms, events)
+		forwardStep(ms, events, digest)
 	}
 }
 
 // forwardStep 消费一步的消息流。
-func forwardStep(ms *schema.StreamReader[*schema.Message], events chan<- sseEvent) {
+func forwardStep(ms *schema.StreamReader[*schema.Message], events chan<- sseEvent, digest *turnDigest) {
 	defer ms.Close()
 
 	var chunks []*schema.Message
@@ -301,28 +318,85 @@ func forwardStep(ms *schema.StreamReader[*schema.Message], events chan<- sseEven
 	}
 	switch full.Role {
 	case schema.Tool:
-		// 工具结果原文可能很长（一堆 JSON），前端只需要知道「查到了」，给个摘要。
+		// 工具结果原文可能很长（一堆 JSON），前端只需要知道「查到了」，给个摘要；
+		// 完整结果进备忘——那才是下一轮回灌时真正值钱的部分。
 		events <- sseEvent{
 			Type: "thinking",
 			Text: fmt.Sprintf("✅ %s 返回了 %d 字\n", full.ToolName, len([]rune(full.Content))),
 		}
+		digest.addResult(full.ToolName, full.Content)
 	case schema.Assistant:
 		for _, tc := range full.ToolCalls {
 			events <- sseEvent{
 				Type: "thinking",
 				Text: fmt.Sprintf("🔧 调用 %s %s\n", tc.Function.Name, tc.Function.Arguments),
 			}
+			digest.addCall(tc.Function.Name, tc.Function.Arguments)
 		}
 	}
 }
 
+// ---- L1 轨迹回灌：工具备忘 ----
+
+// maxDigestResultRunes 限制每条工具结果进备忘的长度，防备忘无限膨胀。
+// 现有工具单条结果几百字，1000 字符的帽子正常打不到，只防极端情况。
+const maxDigestResultRunes = 1000
+
+// turnDigest 累积一轮 agent 的完整工具轨迹：调了什么（名字+参数）、查到什么（结果原文）。
+//
+// 它是「对话连续性」的最轻实现：服务端不存任何会话状态，把本轮查到的数据打包
+// 交给客户端保管，下一轮随历史带回来再注入上下文——像把清算现场的关键单据
+// 塞给客户带走，下次来直接出示，柜台不用重新调档。
+//
+// 只被 thinking 侧单个 goroutine 写入；读取发生在 events channel 关闭之后
+// （close 是同步点），所以不需要锁。
+type turnDigest struct {
+	b strings.Builder
+}
+
+func (d *turnDigest) addCall(name, args string) {
+	fmt.Fprintf(&d.b, "🔧 %s %s\n", name, args)
+}
+
+func (d *turnDigest) addResult(name, content string) {
+	fmt.Fprintf(&d.b, "[%s 结果]\n%s\n", name, truncateRunes(content, maxDigestResultRunes))
+}
+
+func (d *turnDigest) String() string { return d.b.String() }
+
+// truncateRunes 按字符数截断——中文场景按字节截会把一个汉字剁成半个。
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…（已截断）"
+}
+
 // toEinoMessages 把前端消息转成 eino 的 []*schema.Message。
 // 角色是 assistant 的当历史助手回复，其余一律当用户输入。
+//
+// L1 轨迹回灌：只注入「最近一条」带备忘的助手消息的工具轨迹——工具数据有时效性，
+// 且相邻轮次查的内容高度重叠（recent_meals 每轮都差不多），全量回灌只会白白撑大上下文。
+// 注入形式是紧跟在那条助手回复后面的 system 消息，明确告诉模型「这是你自己查到过的数据」。
 func toEinoMessages(in []chatMessage) []*schema.Message {
-	out := make([]*schema.Message, 0, len(in))
-	for _, m := range in {
+	lastCtx := -1
+	for i, m := range in {
+		if schema.RoleType(m.Role) == schema.Assistant && m.Context != "" {
+			lastCtx = i
+		}
+	}
+
+	out := make([]*schema.Message, 0, len(in)+1)
+	for i, m := range in {
 		if schema.RoleType(m.Role) == schema.Assistant {
 			out = append(out, schema.AssistantMessage(m.Content, nil))
+			if i == lastCtx {
+				out = append(out, schema.SystemMessage(
+					"【工具备忘】以下是你上一轮回答时亲自调用工具查到的真实数据（不是编造的），"+
+						"本轮可以直接引用它作答；只有当备忘不够回答本轮问题、或数据可能已过期时，才需要再次调用工具：\n"+
+						m.Context))
+			}
 		} else {
 			out = append(out, schema.UserMessage(m.Content))
 		}

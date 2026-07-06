@@ -48,4 +48,8 @@ struct ChatMessage: Identifiable {
     var text: String
     // 思考过程（模型推理 + 工具调用轨迹）。只有助手消息才有；发给后端的历史里不带它。
     var thinking: String = ""
+    // 工具备忘（L1 轨迹回灌）：后端在流末尾发来的本轮工具轨迹完整记录。
+    // 只展示不渲染，下一轮随历史原样带回——后端注入上下文后，追问就不必重查同样的数据。
+    // 状态由客户端保管，后端保持无状态。
+    var context: String = ""
 }

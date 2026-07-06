@@ -86,11 +86,18 @@ struct HistoryView: View {
 
     private var list: some View {
         List(vm.days) { day in
-            Section(day.date) {
+            Section {
                 // 一餐的具体渲染在 MealRowView（CalendarHistoryView.swift），列表和日历共用。
                 MealRowView(label: "午餐", meal: day.lunch)
                 MealRowView(label: "水果", meal: day.fruit)
                 MealRowView(label: "晚餐", meal: day.dinner)
+            } header: {
+                HStack(spacing: 6) {
+                    Text(day.date)
+                    if let wd = DateFmt.weekdayName(day.date) {
+                        Text(wd).foregroundStyle(.secondary)
+                    }
+                }
             }
         }
         .listStyle(.insetGrouped)

@@ -34,5 +34,7 @@ struct RootView: View {
                     Label("时令", systemImage: "leaf")
                 }
         }
+        // 全局主色：暖橙——备餐 app 的「食欲色」，tab/按钮/选中态一起生效。
+        .tint(.orange)
     }
 }
