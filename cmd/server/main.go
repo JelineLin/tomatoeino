@@ -321,7 +321,7 @@ func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
 	if ans := answerBuf.String(); ans != "" {
 		turn = append(turn, schema.AssistantMessage(ans, nil))
 	}
-	s.sessions.append(sessionID, turn)
+	s.sessions.append(sessionID, completeToolCalls(turn))
 	writeSSEEvent(w, flusher, sseEvent{Type: "session", Text: sessionID})
 
 	// L1 备忘照发：会话丢了（过期/重启）时客户端靠它降级，连续性不断崖。
@@ -543,11 +543,48 @@ func (r *turnRecorder) add(m *schema.Message) {
 	if m.Role != schema.Tool && !(m.Role == schema.Assistant && len(m.ToolCalls) > 0) {
 		return
 	}
+	// 去重：ToolReturnDirectly 路径下，工具结果可能既作为工具节点输出、又作为
+	// direct_return 节点输出各交付一次——同一条 tool 消息收两遍会坏协议。
+	if m.Role == schema.Tool {
+		for _, prev := range r.msgs {
+			if prev.Role == schema.Tool && prev.ToolCallID == m.ToolCallID && prev.Content == m.Content {
+				return
+			}
+		}
+	}
 	// 浅拷贝后剥掉 reasoning：思考过程是一次性的，不该进回放历史
 	//（有些 OpenAI 兼容端点会拒绝入参里出现 reasoning 字段）。
 	c := *m
 	c.ReasoningContent = ""
 	r.msgs = append(r.msgs, &c)
+}
+
+// completeToolCalls 保证一轮消息协议完整：每个 assistant 的 tool_call 都必须有
+// 对应的 tool 结果消息，缺了就补一条占位——OpenAI 兼容端点对「有调用没结果」的
+// 历史直接报错（和清算里每笔委托必须有终态回执是一个道理）。
+// ToolReturnDirectly 场景下工具结果经由 direct_return 交付，future 的步骤形态
+// 没有文档保证，这里兜底而不是赌它的实现细节。
+func completeToolCalls(turn []*schema.Message) []*schema.Message {
+	seen := map[string]bool{}
+	for _, m := range turn {
+		if m.Role == schema.Tool && m.ToolCallID != "" {
+			seen[m.ToolCallID] = true
+		}
+	}
+	out := make([]*schema.Message, 0, len(turn))
+	for _, m := range turn {
+		out = append(out, m)
+		if m.Role != schema.Assistant {
+			continue
+		}
+		for _, tc := range m.ToolCalls {
+			if tc.ID != "" && !seen[tc.ID] {
+				out = append(out, schema.ToolMessage("（结果已直接转达家长）", tc.ID))
+				seen[tc.ID] = true
+			}
+		}
+	}
+	return out
 }
 
 // newSessionID 生成会话钥匙：16 字节随机数的 hex。

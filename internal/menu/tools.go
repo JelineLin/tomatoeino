@@ -18,6 +18,11 @@ import (
 // 不是「精确查一行」，给几条让模型自己挑。
 const searchTopK = 6
 
+// ToolNameAskUser 是「向家长提问」工具名。agent.go 把它配进 ToolReturnDirectly：
+// 模型一调它，整轮立即结束、问题原文就是本轮输出——这是 L3「对话级中断」的一半；
+// 另一半靠 L2 会话：家长回答随下一轮进来，模型在全保真历史上原地续推。
+const ToolNameAskUser = "ask_user"
+
 // NewTools 把 agent 的能力包成 eino 工具，交给 ReAct agent 自主调用。
 //
 // 关键设计：每个工具都是独立、自带描述的——模型只看描述就知道「该用哪个」。
@@ -25,11 +30,12 @@ const searchTopK = 6
 // 这正是选 ReAct 而非写死 RAG 链的回报——seasonal_produce 的加入就是第一次兑现：
 // 只动了 tools.go（append）和人设一句口径，检索/编排一行没改。
 //
-// 四个工具覆盖四种「数据形态」：
+// 五个工具覆盖不同「形态」：
 //   - search_meal_history ：语义检索（意思像就行，靠向量库）
 //   - recent_meals        ：按时间取最近 N 天（精确、不耗 embedding）
 //   - find_by_ingredient  ：按食材精确子串匹配（找「含某样东西」的餐）
 //   - seasonal_produce    ：计算型（时令表 + 当前日期的纯函数，见 season.go）
+//   - ask_user            ：人机交互（向家长提问并中断本轮，见 ToolNameAskUser）
 func NewTools(store *vectorstore.Store, days []Day) ([]tool.BaseTool, error) {
 	searchTool, err := utils.InferTool(
 		"search_meal_history",
@@ -71,7 +77,18 @@ func NewTools(store *vectorstore.Store, days []Day) ([]tool.BaseTool, error) {
 		return nil, fmt.Errorf("创建 seasonal_produce 工具失败: %w", err)
 	}
 
-	return []tool.BaseTool{searchTool, recentTool, ingredientTool, seasonTool}, nil
+	askTool, err := utils.InferTool(
+		ToolNameAskUser,
+		"当缺少只有家长才知道的关键信息（如冰箱里现有什么、宝宝今天胃口如何、想吃荤还是素）时，"+
+			"用它向家长提一个具体问题。调用后本轮立即结束、问题直接呈给家长，家长的回答会出现在"+
+			"下一条消息里。一次只问一个问题；不要和其他工具同时调用；能从历史/时令查到的信息不要问。",
+		makeAskUser(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("创建 ask_user 工具失败: %w", err)
+	}
+
+	return []tool.BaseTool{searchTool, recentTool, ingredientTool, seasonTool, askTool}, nil
 }
 
 // ---- search_meal_history ----
@@ -164,6 +181,27 @@ func makeFindByIngredient(days []Day) func(context.Context, ingredientInput) (st
 			return fmt.Sprintf("历史里没有出现过「%s」。", kw), nil
 		}
 		return fmt.Sprintf("历史上含「%s」的餐次：\n%s", kw, strings.Join(hits, "\n")), nil
+	}
+}
+
+// ---- ask_user ----
+
+type askInput struct {
+	Question string `json:"question" jsonschema:"description=要问家长的一个具体问题，中文，一次只问一件事,required"`
+}
+
+// makeAskUser 返回「向家长提问」工具。它不查任何数据——职责只是把问题原样交出去；
+// 「调用即结束本轮」的行为不在这里实现，而是靠 agent 装配时的 ToolReturnDirectly
+//（见 agent.go）。工具管内容、编排管流程，各归各位。
+func makeAskUser() func(context.Context, askInput) (string, error) {
+	return func(ctx context.Context, in askInput) (string, error) {
+		q := strings.TrimSpace(in.Question)
+		log.Printf("🔧 ask_user(question=%q)", q)
+		if q == "" {
+			// 别让空问题把整轮变成空白回复。
+			return "想再和家长确认一点信息：请补充一下想吃什么、或家里现有什么食材？", nil
+		}
+		return q, nil
 	}
 }
 

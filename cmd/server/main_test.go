@@ -215,3 +215,46 @@ func TestNewSessionID(t *testing.T) {
 		t.Errorf("会话 id 应为 32 位 hex 且互不相同：%q %q", a, b)
 	}
 }
+
+// ---- L3 对话级中断 ----
+
+func TestTurnRecorder_DedupToolResult(t *testing.T) {
+	r := &turnRecorder{}
+	// ToolReturnDirectly 下同一条工具结果可能交付两次——应去重。
+	r.add(schema.ToolMessage("问题原文", "call-1"))
+	r.add(schema.ToolMessage("问题原文", "call-1"))
+	if len(r.msgs) != 1 {
+		t.Errorf("重复 tool 消息应去重，实际 %d 条", len(r.msgs))
+	}
+	// 不同 ToolCallID 不算重复。
+	r.add(schema.ToolMessage("问题原文", "call-2"))
+	if len(r.msgs) != 2 {
+		t.Errorf("不同调用的结果不该被去重，实际 %d 条", len(r.msgs))
+	}
+}
+
+func TestCompleteToolCalls(t *testing.T) {
+	// 场景 1：调用有配对结果 → 原样不动。
+	ok := []*schema.Message{
+		schema.UserMessage("u"),
+		schema.AssistantMessage("", []schema.ToolCall{{ID: "c1"}}),
+		schema.ToolMessage("r1", "c1"),
+	}
+	if got := completeToolCalls(ok); len(got) != 3 {
+		t.Errorf("配对完整不该增删，得到 %d 条", len(got))
+	}
+
+	// 场景 2：有调用没结果 → 紧跟其后补占位 tool 消息。
+	missing := []*schema.Message{
+		schema.UserMessage("u"),
+		schema.AssistantMessage("", []schema.ToolCall{{ID: "c1"}}),
+		schema.AssistantMessage("答案", nil),
+	}
+	got := completeToolCalls(missing)
+	if len(got) != 4 {
+		t.Fatalf("应补 1 条占位，共 4 条，实际 %d", len(got))
+	}
+	if got[2].Role != schema.Tool || got[2].ToolCallID != "c1" {
+		t.Errorf("占位应紧跟带调用的 assistant 且 ToolCallID 配对，实际 %+v", got[2])
+	}
+}
