@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/cloudwego/eino/components/retriever"
 	"github.com/cloudwego/eino/components/tool"
@@ -17,16 +18,18 @@ import (
 // 不是「精确查一行」，给几条让模型自己挑。
 const searchTopK = 6
 
-// NewTools 把「查历史」的几种能力包成 eino 工具，交给 ReAct agent 自主调用。
+// NewTools 把 agent 的能力包成 eino 工具，交给 ReAct agent 自主调用。
 //
 // 关键设计：每个工具都是独立、自带描述的——模型只看描述就知道「该用哪个」。
-// 加一个数据源（将来的 超市/时令/库存）= 再 append 一个 InferTool，agent 编排不用改。
-// 这正是选 ReAct 而非写死 RAG 链的回报。
+// 加一个数据源（将来的 超市/库存）= 再 append 一个 InferTool，agent 编排不用改。
+// 这正是选 ReAct 而非写死 RAG 链的回报——seasonal_produce 的加入就是第一次兑现：
+// 只动了 tools.go（append）和人设一句口径，检索/编排一行没改。
 //
-// 三个工具刻意覆盖三种「查法」：
+// 四个工具覆盖四种「数据形态」：
 //   - search_meal_history ：语义检索（意思像就行，靠向量库）
 //   - recent_meals        ：按时间取最近 N 天（精确、不耗 embedding）
 //   - find_by_ingredient  ：按食材精确子串匹配（找「含某样东西」的餐）
+//   - seasonal_produce    ：计算型（时令表 + 当前日期的纯函数，见 season.go）
 func NewTools(store *vectorstore.Store, days []Day) ([]tool.BaseTool, error) {
 	searchTool, err := utils.InferTool(
 		"search_meal_history",
@@ -58,7 +61,17 @@ func NewTools(store *vectorstore.Store, days []Day) ([]tool.BaseTool, error) {
 		return nil, fmt.Errorf("创建 find_by_ingredient 工具失败: %w", err)
 	}
 
-	return []tool.BaseTool{searchTool, recentTool, ingredientTool}, nil
+	seasonTool, err := utils.InferTool(
+		"seasonal_produce",
+		"查指定月份的时令食材（不传 month 默认当前月份）：应季蔬菜、水果、水产，附备餐提示。"+
+			"适合『来点应季的』『这个季节吃什么合适』，以及推荐配菜前确认食材是否应季。",
+		makeSeasonal(time.Now),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("创建 seasonal_produce 工具失败: %w", err)
+	}
+
+	return []tool.BaseTool{searchTool, recentTool, ingredientTool, seasonTool}, nil
 }
 
 // ---- search_meal_history ----
