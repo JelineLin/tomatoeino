@@ -41,6 +41,32 @@ struct APIClient {
         return try JSONDecoder().decode(Season.self, from: data)
     }
 
+    // MARK: - 今日简报
+
+    // fetchBrief 拉取后端定时生成的「今日备餐简报」。
+    //   - refresh=false：拿现成的；后端还没生成时返回 nil（404 不是错误，是「还没有」）。
+    //   - refresh=true ：让后端现做一份（agent 要跑几十秒，调用方自己给等待反馈）。
+    func fetchBrief(refresh: Bool = false) async throws -> DailyBrief? {
+        var components = URLComponents(
+            url: baseURL.appendingPathComponent("api/brief"),
+            resolvingAgainstBaseURL: false
+        )!
+        if refresh {
+            components.queryItems = [URLQueryItem(name: "refresh", value: "1")]
+        }
+        var request = URLRequest(url: components.url!)
+        request.timeoutInterval = refresh ? 180 : 15 // 现做要等 agent 跑完，放宽超时
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        if let http = response as? HTTPURLResponse, http.statusCode == 404 {
+            return nil // 还没有简报——空态，不抛错
+        }
+        try Self.checkOK(response)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601 // 后端已截断到秒，标准 ISO8601 直接解
+        return try decoder.decode(DailyBrief.self, from: data)
+    }
+
     // MARK: - 流式对话
 
     // streamChat 把整段对话历史发给 /api/chat，返回一个事件异步序列。

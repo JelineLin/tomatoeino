@@ -35,6 +35,14 @@ struct Season: Codable {
     let tip: String
 }
 
+// DailyBrief 是后端定时生成的「今日备餐简报」，对应 /api/brief 的 JSON。
+// content 是 agent 写的 Markdown，直接交给 MarkdownText 渲染。
+struct DailyBrief: Codable {
+    let date: String        // 简报对应的日期 yyyy-MM-dd
+    let content: String
+    let generatedAt: Date   // 生成时刻（后端 RFC3339，需 ISO8601 解码策略）
+}
+
 // ChatMessage 是聊天界面里的一条消息。text/thinking 设计成 var，
 // 因为助手回复是流式的——边收 token 边往同一条消息里追加。
 struct ChatMessage: Identifiable {
