@@ -6,14 +6,11 @@
 import Foundation
 
 struct APIClient {
-    // 后端地址。模拟器和 Mac 是同一台机器，走 localhost；
-    // 真机和 Mac 不是一台机器，得走 Mac 的局域网 IP（手机和 Mac 需在同一 Wi-Fi）。
-    // 编译期按目标环境二选一——IP 变了只需改下面这一处（Mac 上查：ipconfig getifaddr en0）。
-    #if targetEnvironment(simulator)
-    var baseURL = URL(string: "http://localhost:8080")!
-    #else
-    var baseURL = URL(string: "http://192.168.1.24:8080")!
-    #endif
+    // 后端地址：默认连云端 hermas（阿里云，systemd 托管，见部署记录）——
+    // 模拟器和真机统一走它，出门也能用，库存账本以云端这份为准。
+    // 本地开发调试后端时，把下面一行临时换成 localhost（须先 go run ./cmd/server）。
+    var baseURL = URL(string: "http://101.132.191.7:8080")!
+    // var baseURL = URL(string: "http://localhost:8080")!  // ← 本地调试用
 
     // apiToken 与后端 .env 里的 API_TOKEN 一致，值放在 Secrets.swift（已 gitignore，
     // 见 Secrets.swift.example）——仓库是公开的，密钥绝不能写进要提交的源码。

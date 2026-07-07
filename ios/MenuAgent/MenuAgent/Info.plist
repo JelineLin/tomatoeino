@@ -20,8 +20,13 @@
 	<string>1</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<!-- ATS：后端目前是「公网 IP + 纯 HTTP」（无域名签不了证书，走不了按域豁免），
+	     只能全局放行 HTTP。升级 Caddy+域名 HTTPS 后应删掉 NSAllowsArbitraryLoads。
+	     注意：token 在纯 HTTP 上是明文传输（已知情接受，见部署记录）。 -->
 	<key>NSAppTransportSecurity</key>
 	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
