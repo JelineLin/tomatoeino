@@ -15,6 +15,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -86,9 +87,16 @@ func main() {
 	mux.HandleFunc("/api/inventory", srv.handleInventory)
 	mux.HandleFunc("/api/chat", srv.handleChat)
 
+	// 鉴权：API_TOKEN 设了就强制校验（公网部署必须设）；没设则放行并醒目告警，
+	// 本地学习跑不受影响。CORS 在最外层，预检 OPTIONS 不带鉴权头也能通过。
+	apiToken := os.Getenv("API_TOKEN")
+	if apiToken == "" {
+		log.Println("⚠️  API_TOKEN 未设置，/api/* 处于无鉴权状态——切勿暴露到公网！")
+	}
+
 	httpServer := &http.Server{
 		Addr:    ":" + envOr("PORT", "8080"),
-		Handler: withCORS(mux),
+		Handler: withCORS(withAuth(apiToken, mux)),
 		// 只限「读完请求头」的时间，挡掉 slowloris（把连接吊着迟迟不发完头）。
 		// 故意不设 WriteTimeout——SSE 是长连接，设了会把正常的流式回答拦腰截断。
 		ReadHeaderTimeout: 10 * time.Second,
@@ -685,9 +693,28 @@ func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// withAuth 给 /api/* 加 Bearer Token 校验；/healthz 等其余路径放行（探针不该带密钥）。
+// token 为空 = 鉴权关闭（本地开发模式，main 里已打过警告）。
+// 用常数时间比较抵御计时侧信道——单用户场景其实用不上，但这是养成习惯的成本最低处。
+func withAuth(token string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if token == "" || !strings.HasPrefix(r.URL.Path, "/api/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		want := "Bearer " + token
+		got := r.Header.Get("Authorization")
+		if subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
+			http.Error(w, "未授权：请求需携带 Authorization: Bearer <API_TOKEN>", http.StatusUnauthorized)
 			return
 		}
 		next.ServeHTTP(w, r)

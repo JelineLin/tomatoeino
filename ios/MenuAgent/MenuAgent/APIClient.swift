@@ -15,11 +15,23 @@ struct APIClient {
     var baseURL = URL(string: "http://192.168.1.24:8080")!
     #endif
 
+    // apiToken 与后端 .env 里的 API_TOKEN 一致，值放在 Secrets.swift（已 gitignore，
+    // 见 Secrets.swift.example）——仓库是公开的，密钥绝不能写进要提交的源码。
+    // 所有请求统一从 authorizedRequest 出去，别再裸建 URLRequest。
+    private let apiToken = Secrets.apiToken
+
+    // authorizedRequest 是全部请求的统一出口：带上鉴权头。
+    private func authorizedRequest(_ url: URL) -> URLRequest {
+        var req = URLRequest(url: url)
+        req.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
+        return req
+    }
+
     // MARK: - 历史
 
     func fetchHistory() async throws -> [Day] {
         let url = baseURL.appendingPathComponent("api/history")
-        let (data, response) = try await URLSession.shared.data(from: url)
+        let (data, response) = try await URLSession.shared.data(for: authorizedRequest(url))
         try Self.checkOK(response)
         return try JSONDecoder().decode([Day].self, from: data)
     }
@@ -36,7 +48,7 @@ struct APIClient {
         if let month {
             components.queryItems = [URLQueryItem(name: "month", value: String(month))]
         }
-        let (data, response) = try await URLSession.shared.data(from: components.url!)
+        let (data, response) = try await URLSession.shared.data(for: authorizedRequest(components.url!))
         try Self.checkOK(response)
         return try JSONDecoder().decode(Season.self, from: data)
     }
@@ -54,7 +66,7 @@ struct APIClient {
         if refresh {
             components.queryItems = [URLQueryItem(name: "refresh", value: "1")]
         }
-        var request = URLRequest(url: components.url!)
+        var request = authorizedRequest(components.url!)
         request.timeoutInterval = refresh ? 180 : 15 // 现做要等 agent 跑完，放宽超时
 
         let (data, response) = try await URLSession.shared.data(for: request)
@@ -81,7 +93,7 @@ struct APIClient {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
-                    var request = URLRequest(url: baseURL.appendingPathComponent("api/chat"))
+                    var request = authorizedRequest(baseURL.appendingPathComponent("api/chat"))
                     request.httpMethod = "POST"
                     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
                     request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
