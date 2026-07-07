@@ -4,6 +4,9 @@
 # Go
 /bin/
 
+# 运行时数据（家庭库存账本等），agent 会写它，不入库
+/data/
+
 # iOS / Xcode 构建产物与用户私有状态
 ios/**/build/
 ios/**/DerivedData/

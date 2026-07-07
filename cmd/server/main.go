@@ -40,24 +40,31 @@ import (
 // defaultHistoryPath 是 history.json 相对仓库根目录的位置，可用 HISTORY_PATH 覆盖。
 const defaultHistoryPath = "examples/02_menu_agent/data/history.json"
 
+// defaultInventoryPath 是库存账本落盘位置（运行时数据，已 gitignore），
+// 可用 INVENTORY_PATH 覆盖。
+const defaultInventoryPath = "data/inventory.json"
+
 // server 持有装配好的 agent 和历史数据。agent 内部是编译好的 eino 图，
 // 可并发处理多个请求，所以这里一个实例全局共享即可。
 type server struct {
 	agent    *react.Agent
 	days     []menu.Day
-	sessions *sessionStore // L2 服务端会话：session_id → 全保真消息史
-	briefs   *briefStore   // L4 每日简报：定时生成，等前端来取
+	inv      *menu.InventoryStore // 家庭库存账本：和 agent 的库存工具共用同一本账
+	sessions *sessionStore        // L2 服务端会话：session_id → 全保真消息史
+	briefs   *briefStore          // L4 每日简报：定时生成，等前端来取
 }
 
 func main() {
 	// 装配 agent 用一个独立的启动 ctx；服务运行期的取消由下面的信号驱动，两者互不影响。
-	agent, days, err := menu.BuildAgent(context.Background(), envOr("HISTORY_PATH", defaultHistoryPath))
+	agent, days, inv, err := menu.BuildAgent(context.Background(),
+		envOr("HISTORY_PATH", defaultHistoryPath),
+		envOr("INVENTORY_PATH", defaultInventoryPath))
 	if err != nil {
 		log.Fatalf("装配 agent 失败: %v", err)
 	}
 
 	sessions := newSessionStore(sessionTTL)
-	srv := &server{agent: agent, days: days, sessions: sessions, briefs: &briefStore{}}
+	srv := &server{agent: agent, days: days, inv: inv, sessions: sessions, briefs: &briefStore{}}
 
 	// 会话清扫：周期性清掉过期会话，防内存慢涨。goroutine 随进程退出，不用专门收尾。
 	go func() {
@@ -76,6 +83,7 @@ func main() {
 	mux.HandleFunc("/api/history", srv.handleHistory)
 	mux.HandleFunc("/api/seasonal", srv.handleSeasonal)
 	mux.HandleFunc("/api/brief", srv.handleBrief)
+	mux.HandleFunc("/api/inventory", srv.handleInventory)
 	mux.HandleFunc("/api/chat", srv.handleChat)
 
 	httpServer := &http.Server{
@@ -148,6 +156,21 @@ func (s *server) handleSeasonal(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	if err := json.NewEncoder(w).Encode(menu.SeasonFor(time.Month(m))); err != nil {
 		log.Printf("/api/seasonal 编码失败: %v", err)
+	}
+}
+
+// handleInventory 返回家庭库存账本，给前端「库存」界面渲染。
+// 数据和 agent 的 list/add/consume_inventory 工具同一本账（menu.InventoryStore），
+// 聊天里 agent 记的账和这里展示的，永远一个口径。改账走聊天（agent 工具），
+// 这里只读——写入口收敛在一处，避免两条写路径打架。
+func (s *server) handleInventory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "只支持 GET", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if err := json.NewEncoder(w).Encode(s.inv.List(r.URL.Query().Get("keyword"))); err != nil {
+		log.Printf("/api/inventory 编码失败: %v", err)
 	}
 }
 

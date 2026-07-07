@@ -27,11 +27,14 @@ import (
 
 const historyPath = "examples/02_menu_agent/data/history.json"
 
+// inventoryPath 和 cmd/server 共用同一本库存账（运行时数据，已 gitignore）。
+const inventoryPath = "data/inventory.json"
+
 func main() {
 	ctx := context.Background()
 
-	// 装配 agent：读历史 → 灌向量库 → 建模型+工具 → ReAct agent。
-	agent, days, err := menu.BuildAgent(ctx, historyPath)
+	// 装配 agent：读历史+库存 → 灌向量库 → 建模型+工具 → ReAct agent。
+	agent, days, _, err := menu.BuildAgent(ctx, historyPath, inventoryPath)
 	if err != nil {
 		log.Fatal(err)
 	}
