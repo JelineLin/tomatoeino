@@ -1,0 +1,14 @@
+# 本地环境变量，含密钥，禁止提交
+.env
+
+# Go
+/bin/
+
+# iOS / Xcode 构建产物与用户私有状态
+ios/**/build/
+ios/**/DerivedData/
+ios/**/xcuserdata/
+ios/**/*.xcuserstate
+
+# macOS
+.DS_Store
