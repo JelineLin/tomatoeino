@@ -46,6 +46,7 @@ type server struct {
 	agent    *react.Agent
 	days     []menu.Day
 	sessions *sessionStore // L2 服务端会话：session_id → 全保真消息史
+	briefs   *briefStore   // L4 每日简报：定时生成，等前端来取
 }
 
 func main() {
@@ -56,7 +57,7 @@ func main() {
 	}
 
 	sessions := newSessionStore(sessionTTL)
-	srv := &server{agent: agent, days: days, sessions: sessions}
+	srv := &server{agent: agent, days: days, sessions: sessions, briefs: &briefStore{}}
 
 	// 会话清扫：周期性清掉过期会话，防内存慢涨。goroutine 随进程退出，不用专门收尾。
 	go func() {
@@ -67,10 +68,14 @@ func main() {
 		}
 	}()
 
+	// L4：每日简报调度（默认早上 7 点，DAILY_BRIEF_AT 覆盖，off 关闭）。
+	go srv.runBriefScheduler(envOr("DAILY_BRIEF_AT", "07:00"))
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", srv.handleHealth)
 	mux.HandleFunc("/api/history", srv.handleHistory)
 	mux.HandleFunc("/api/seasonal", srv.handleSeasonal)
+	mux.HandleFunc("/api/brief", srv.handleBrief)
 	mux.HandleFunc("/api/chat", srv.handleChat)
 
 	httpServer := &http.Server{
