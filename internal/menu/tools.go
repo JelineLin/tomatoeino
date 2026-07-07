@@ -30,13 +30,15 @@ const ToolNameAskUser = "ask_user"
 // 这正是选 ReAct 而非写死 RAG 链的回报——seasonal_produce 的加入就是第一次兑现：
 // 只动了 tools.go（append）和人设一句口径，检索/编排一行没改。
 //
-// 五个工具覆盖不同「形态」：
+// 工具按「形态」分组：
 //   - search_meal_history ：语义检索（意思像就行，靠向量库）
 //   - recent_meals        ：按时间取最近 N 天（精确、不耗 embedding）
 //   - find_by_ingredient  ：按食材精确子串匹配（找「含某样东西」的餐）
 //   - seasonal_produce    ：计算型（时令表 + 当前日期的纯函数，见 season.go）
 //   - ask_user            ：人机交互（向家长提问并中断本轮，见 ToolNameAskUser）
-func NewTools(store *vectorstore.Store, days []Day) ([]tool.BaseTool, error) {
+//   - list/add/consume_inventory：有状态读写（家庭库存账本，见 inventory.go）——
+//     前面全是「读世界」，这三个开始「写世界」，agent 从顾问变成管家。
+func NewTools(store *vectorstore.Store, days []Day, inv *InventoryStore) ([]tool.BaseTool, error) {
 	searchTool, err := utils.InferTool(
 		"search_meal_history",
 		"按语义检索宝宝的历史菜单：传入一句自然语言（如『清淡的鱼类晚餐』『不重样的午餐』），"+
@@ -79,16 +81,49 @@ func NewTools(store *vectorstore.Store, days []Day) ([]tool.BaseTool, error) {
 
 	askTool, err := utils.InferTool(
 		ToolNameAskUser,
-		"当缺少只有家长才知道的关键信息（如冰箱里现有什么、宝宝今天胃口如何、想吃荤还是素）时，"+
+		"当缺少只有家长才知道的关键信息（如宝宝今天胃口如何、想吃荤还是素）时，"+
 			"用它向家长提一个具体问题。调用后本轮立即结束、问题直接呈给家长，家长的回答会出现在"+
-			"下一条消息里。一次只问一个问题；不要和其他工具同时调用；能从历史/时令查到的信息不要问。",
+			"下一条消息里。一次只问一个问题；不要和其他工具同时调用；能从历史/时令/库存查到的信息不要问。",
 		makeAskUser(),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("创建 ask_user 工具失败: %w", err)
 	}
 
-	return []tool.BaseTool{searchTool, recentTool, ingredientTool, seasonTool, askTool}, nil
+	listInvTool, err := utils.InferTool(
+		"list_inventory",
+		"查看家庭库存账本：家里现有哪些食材、各剩多少份。推荐用料前先查它，优先消耗现有食材。"+
+			"可选按名称关键词过滤。",
+		makeListInventory(inv),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("创建 list_inventory 工具失败: %w", err)
+	}
+
+	addInvTool, err := utils.InferTool(
+		"add_inventory",
+		"食材入库（家长说「买了」「囤了」某样食材时用）：按份数累加进库存账本，同名食材份数叠加。"+
+			"份数可为小数（0.5=半份），单位可自定（份/块/个/袋等，不传沿用已有或默认「份」）。",
+		makeAddInventory(inv),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("创建 add_inventory 工具失败: %w", err)
+	}
+
+	consumeInvTool, err := utils.InferTool(
+		"consume_inventory",
+		"食材出库（家长说「用掉了」「吃完了」某样食材时用）：按份数从库存账本扣减，"+
+			"份数可为小数（0.5=半份）；扣到 0 自动出清。一次只扣一种食材，多种就多次调用。",
+		makeConsumeInventory(inv),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("创建 consume_inventory 工具失败: %w", err)
+	}
+
+	return []tool.BaseTool{
+		searchTool, recentTool, ingredientTool, seasonTool, askTool,
+		listInvTool, addInvTool, consumeInvTool,
+	}, nil
 }
 
 // ---- search_meal_history ----
@@ -202,6 +237,68 @@ func makeAskUser() func(context.Context, askInput) (string, error) {
 			return "想再和家长确认一点信息：请补充一下想吃什么、或家里现有什么食材？", nil
 		}
 		return q, nil
+	}
+}
+
+// ---- 家庭库存三件套 ----
+
+type invListInput struct {
+	Keyword string `json:"keyword" jsonschema:"description=可选，按食材名关键词过滤；不传列出全部"`
+}
+
+func makeListInventory(inv *InventoryStore) func(context.Context, invListInput) (string, error) {
+	return func(ctx context.Context, in invListInput) (string, error) {
+		kw := strings.TrimSpace(in.Keyword)
+		log.Printf("🔧 list_inventory(keyword=%q)", kw)
+		items := inv.List(kw)
+		if len(items) == 0 {
+			if kw == "" {
+				return "库存账本是空的——还没有登记过任何食材。", nil
+			}
+			return fmt.Sprintf("库存里没有含「%s」的食材。", kw), nil
+		}
+		lines := make([]string, 0, len(items))
+		for _, it := range items {
+			lines = append(lines, "- "+renderInventoryItem(it))
+		}
+		return "当前家庭库存：\n" + strings.Join(lines, "\n"), nil
+	}
+}
+
+type invAddInput struct {
+	Name     string  `json:"name" jsonschema:"description=食材名，如「鳕鱼」「西兰花」,required"`
+	Quantity float64 `json:"quantity" jsonschema:"description=新增的份数，必须大于 0，可为小数（0.5=半份）,required"`
+	Unit     string  `json:"unit" jsonschema:"description=计量单位，如 份/块/个/袋；不传沿用已有单位或默认「份」"`
+}
+
+func makeAddInventory(inv *InventoryStore) func(context.Context, invAddInput) (string, error) {
+	return func(ctx context.Context, in invAddInput) (string, error) {
+		log.Printf("🔧 add_inventory(name=%q qty=%v unit=%q)", in.Name, in.Quantity, in.Unit)
+		it, err := inv.Add(in.Name, in.Quantity, strings.TrimSpace(in.Unit))
+		if err != nil {
+			// 参数问题用人话还给模型，让它修正后重试，而不是让整轮报错。
+			return "入库失败：" + err.Error(), nil
+		}
+		return fmt.Sprintf("已入库。%s（现有 %s%s）", it.Name, fmtQty(it.Quantity), it.Unit), nil
+	}
+}
+
+type invConsumeInput struct {
+	Name     string  `json:"name" jsonschema:"description=食材名，如「鳕鱼」,required"`
+	Quantity float64 `json:"quantity" jsonschema:"description=用掉的份数，必须大于 0，可为小数（0.5=半份）,required"`
+}
+
+func makeConsumeInventory(inv *InventoryStore) func(context.Context, invConsumeInput) (string, error) {
+	return func(ctx context.Context, in invConsumeInput) (string, error) {
+		log.Printf("🔧 consume_inventory(name=%q qty=%v)", in.Name, in.Quantity)
+		it, depleted, err := inv.Consume(in.Name, in.Quantity)
+		if err != nil {
+			return "出库失败：" + err.Error(), nil
+		}
+		if depleted {
+			return fmt.Sprintf("已出库。%s 用完了（账上清零出清）。", it.Name), nil
+		}
+		return fmt.Sprintf("已出库。%s 还剩 %s%s。", it.Name, fmtQty(it.Quantity), it.Unit), nil
 	}
 }
 

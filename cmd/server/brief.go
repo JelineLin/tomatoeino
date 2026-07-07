@@ -75,9 +75,11 @@ func (s *server) generateBrief(ctx context.Context) (*dailyBrief, error) {
 		return nil, fmt.Errorf("生成简报失败: %w", err)
 	}
 	d := &dailyBrief{
-		Date:        time.Now().Format("2006-01-02"),
-		Content:     msg.Content,
-		GeneratedAt: time.Now(),
+		Date:    time.Now().Format("2006-01-02"),
+		Content: msg.Content,
+		// 截断到秒：Go 默认按 RFC3339Nano 序列化（带纳秒小数），
+		// 而 Swift 的 .iso8601 解码策略不认小数秒——去掉小数两边都省事。
+		GeneratedAt: time.Now().Truncate(time.Second),
 	}
 	s.briefs.set(d)
 	log.Printf("⏰ 今日简报已生成（%d 字）", len([]rune(d.Content)))

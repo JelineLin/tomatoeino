@@ -6,20 +6,29 @@
 import Foundation
 
 struct APIClient {
-    // 后端地址。模拟器和 Mac 是同一台机器，走 localhost；
-    // 真机和 Mac 不是一台机器，得走 Mac 的局域网 IP（手机和 Mac 需在同一 Wi-Fi）。
-    // 编译期按目标环境二选一——IP 变了只需改下面这一处（Mac 上查：ipconfig getifaddr en0）。
-    #if targetEnvironment(simulator)
-    var baseURL = URL(string: "http://localhost:8080")!
-    #else
-    var baseURL = URL(string: "http://192.168.1.24:8080")!
-    #endif
+    // 后端地址：默认连云端 hermas（阿里云，systemd 托管，见部署记录）——
+    // 模拟器和真机统一走它，出门也能用，库存账本以云端这份为准。
+    // 本地开发调试后端时，把下面一行临时换成 localhost（须先 go run ./cmd/server）。
+    var baseURL = URL(string: "http://101.132.191.7:8080")!
+    // var baseURL = URL(string: "http://localhost:8080")!  // ← 本地调试用
+
+    // apiToken 与后端 .env 里的 API_TOKEN 一致，值放在 Secrets.swift（已 gitignore，
+    // 见 Secrets.swift.example）——仓库是公开的，密钥绝不能写进要提交的源码。
+    // 所有请求统一从 authorizedRequest 出去，别再裸建 URLRequest。
+    private let apiToken = Secrets.apiToken
+
+    // authorizedRequest 是全部请求的统一出口：带上鉴权头。
+    private func authorizedRequest(_ url: URL) -> URLRequest {
+        var req = URLRequest(url: url)
+        req.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
+        return req
+    }
 
     // MARK: - 历史
 
     func fetchHistory() async throws -> [Day] {
         let url = baseURL.appendingPathComponent("api/history")
-        let (data, response) = try await URLSession.shared.data(from: url)
+        let (data, response) = try await URLSession.shared.data(for: authorizedRequest(url))
         try Self.checkOK(response)
         return try JSONDecoder().decode([Day].self, from: data)
     }
@@ -36,9 +45,35 @@ struct APIClient {
         if let month {
             components.queryItems = [URLQueryItem(name: "month", value: String(month))]
         }
-        let (data, response) = try await URLSession.shared.data(from: components.url!)
+        let (data, response) = try await URLSession.shared.data(for: authorizedRequest(components.url!))
         try Self.checkOK(response)
         return try JSONDecoder().decode(Season.self, from: data)
+    }
+
+    // MARK: - 今日简报
+
+    // fetchBrief 拉取后端定时生成的「今日备餐简报」。
+    //   - refresh=false：拿现成的；后端还没生成时返回 nil（404 不是错误，是「还没有」）。
+    //   - refresh=true ：让后端现做一份（agent 要跑几十秒，调用方自己给等待反馈）。
+    func fetchBrief(refresh: Bool = false) async throws -> DailyBrief? {
+        var components = URLComponents(
+            url: baseURL.appendingPathComponent("api/brief"),
+            resolvingAgainstBaseURL: false
+        )!
+        if refresh {
+            components.queryItems = [URLQueryItem(name: "refresh", value: "1")]
+        }
+        var request = authorizedRequest(components.url!)
+        request.timeoutInterval = refresh ? 180 : 15 // 现做要等 agent 跑完，放宽超时
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        if let http = response as? HTTPURLResponse, http.statusCode == 404 {
+            return nil // 还没有简报——空态，不抛错
+        }
+        try Self.checkOK(response)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601 // 后端已截断到秒，标准 ISO8601 直接解
+        return try decoder.decode(DailyBrief.self, from: data)
     }
 
     // MARK: - 流式对话
@@ -55,7 +90,7 @@ struct APIClient {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
-                    var request = URLRequest(url: baseURL.appendingPathComponent("api/chat"))
+                    var request = authorizedRequest(baseURL.appendingPathComponent("api/chat"))
                     request.httpMethod = "POST"
                     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
                     request.setValue("text/event-stream", forHTTPHeaderField: "Accept")

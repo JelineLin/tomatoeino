@@ -26,13 +26,18 @@ const systemPersona = `你是一个「幼儿备餐助手」，帮家长依据宝
   这类过渡语）——直接发起工具调用。只有拿到工具结果后，才开口给答案。
 - 工具：search_meal_history（按语义找相近的餐）、recent_meals（看最近几天吃了啥）、
   find_by_ingredient（按食材精确找）、seasonal_produce（查当月应季食材）、
+  list_inventory（查家庭库存）、add_inventory（食材入库）、consume_inventory（食材出库）、
   ask_user（向家长提问，仅当缺少家长才知道的信息时用）。查询类工具可多次、组合调用。
+- 记账职责：家长说「买了 X」就 add_inventory 入库、「用掉了/吃完了 X」就 consume_inventory
+  出库——份数、单位按家长说的如实记，多种食材就逐一调用，记完简短复述账目变化。
 - 例外：如果上下文里出现【工具备忘】，那是你上一轮亲自调用工具查到的真实数据——
   本轮可以直接引用它作答，不必为同样的数据重复调用工具；只有备忘不够回答本轮问题、
   或数据可能过期时才再调工具。
 - 拿到工具结果后，在**同一轮**里直接给出最终、可照做的推荐/答案，不要停在「正在查」。
 
 推荐原则：
+- 优先消耗家庭库存：推荐前先 list_inventory 看家里有什么，能用库存的先用库存，
+  并在推荐里说明用到了哪些库存食材；库存没有的再建议采买。
 - 尽量和最近几天不重样，注意荤素搭配、食材多样。
 - 考虑时令：推荐前可用 seasonal_produce 查当月应季食材，应季的优先、反季的少推。
 - 参考历史里的做法和分量（宝宝餐通常少油少盐、煮软切小）。
@@ -53,32 +58,37 @@ const systemPersona = `你是一个「幼儿备餐助手」，帮家长依据宝
 //	                                                         │
 //	ToolCallingChatModel + Tools(含 Store) ──react.NewAgent──▶ *react.Agent
 //
-// 返回的 []Day 同时给 HTTP 层的 /api/history 直接用，省一次读盘。
-func BuildAgent(ctx context.Context, historyPath string) (*react.Agent, []Day, error) {
-	// 1. 读历史
+// 返回的 []Day 给 HTTP 层的 /api/history 直接用；*InventoryStore 给 /api/inventory
+// 直接用（和 agent 的库存工具共用同一本账，一份数据两个出口，说法永不打架）。
+func BuildAgent(ctx context.Context, historyPath, inventoryPath string) (*react.Agent, []Day, *InventoryStore, error) {
+	// 1. 读历史 + 打开库存账本
 	days, err := LoadHistory(historyPath)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
+	}
+	inv, err := NewInventoryStore(inventoryPath)
+	if err != nil {
+		return nil, nil, nil, err
 	}
 
 	// 2. 建 embedder + 向量库，把历史灌进去（一次批量 embedding）
 	embedder, err := llm.NewEmbedder(ctx)
 	if err != nil {
-		return nil, nil, fmt.Errorf("创建 embedder 失败: %w", err)
+		return nil, nil, nil, fmt.Errorf("创建 embedder 失败: %w", err)
 	}
 	store := vectorstore.New(embedder)
 	if err := store.Add(ctx, BuildDocuments(days)); err != nil {
-		return nil, nil, fmt.Errorf("把历史灌进向量库失败: %w", err)
+		return nil, nil, nil, fmt.Errorf("把历史灌进向量库失败: %w", err)
 	}
 
 	// 3. 建带工具调用能力的模型 + 工具集
 	cm, err := llm.NewToolCallingChatModel(ctx)
 	if err != nil {
-		return nil, nil, fmt.Errorf("创建 ToolCallingChatModel 失败: %w", err)
+		return nil, nil, nil, fmt.Errorf("创建 ToolCallingChatModel 失败: %w", err)
 	}
-	tools, err := NewTools(store, days)
+	tools, err := NewTools(store, days, inv)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	// 4. 装配 ReAct agent：模型 + 工具 + 人设
@@ -102,8 +112,8 @@ func BuildAgent(ctx context.Context, historyPath string) (*react.Agent, []Day, e
 		MaxStep: 12,
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("创建 ReAct agent 失败: %w", err)
+		return nil, nil, nil, fmt.Errorf("创建 ReAct agent 失败: %w", err)
 	}
 
-	return agent, days, nil
+	return agent, days, inv, nil
 }
