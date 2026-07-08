@@ -6,11 +6,11 @@
 import Foundation
 
 struct APIClient {
-    // 后端地址：默认连云端 hermas（阿里云，systemd 托管，见部署记录）——
-    // 模拟器和真机统一走它，出门也能用，库存账本以云端这份为准。
-    // 本地开发调试后端时，把下面一行临时换成 localhost（须先 go run ./cmd/server）。
-    var baseURL = URL(string: "http://101.132.191.7:8080")!
-    // var baseURL = URL(string: "http://localhost:8080")!  // ← 本地调试用
+    // 后端地址：默认连云端 hermas（HTTPS，自签证书链——设备须安装并信任 certs/ca.crt，
+    // 见 scripts/gen-certs.sh 注释）。模拟器和真机统一走它，库存账本以云端为准。
+    // 本地调试也走 HTTPS（证书 SAN 含 127.0.0.1/localhost，模拟器同样要装 ca.crt）。
+    var baseURL = URL(string: "https://101.132.191.7:8080")!
+    // var baseURL = URL(string: "https://127.0.0.1:8080")!  // ← 本地调试用
 
     // apiToken 与后端 .env 里的 API_TOKEN 一致，值放在 Secrets.swift（已 gitignore，
     // 见 Secrets.swift.example）——仓库是公开的，密钥绝不能写进要提交的源码。

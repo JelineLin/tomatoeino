@@ -4,6 +4,9 @@
 # iOS 本地密钥（照 Secrets.swift.example 抄一份），禁止提交
 ios/MenuAgent/MenuAgent/Secrets.swift
 
+# 自签证书（scripts/gen-certs.sh 生成）。ca.key 是根私钥，泄露=可冒充服务器，绝不入库
+certs/
+
 # Go
 /bin/
 

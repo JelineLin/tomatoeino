@@ -106,10 +106,22 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// TLS：配了 TLS_CERT/TLS_KEY（自签或正式证书均可）就走 HTTPS，同端口直接换协议；
+	// 没配则保持纯 HTTP（本地开发）。自签证书由 scripts/gen-certs.sh 生成，
+	// 客户端信任的是自建 CA（iPhone 装 ca.crt），服务端只拿 server.crt/key。
+	certFile, keyFile := os.Getenv("TLS_CERT"), os.Getenv("TLS_KEY")
+
 	// ListenAndServe 阻塞，扔进 goroutine；主协程去等信号。
 	go func() {
-		log.Printf("备餐 agent 后端启动于 %s（已加载历史 %d 天）", httpServer.Addr, len(days))
-		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		var err error
+		if certFile != "" && keyFile != "" {
+			log.Printf("备餐 agent 后端启动于 %s（HTTPS，已加载历史 %d 天）", httpServer.Addr, len(days))
+			err = httpServer.ListenAndServeTLS(certFile, keyFile)
+		} else {
+			log.Printf("备餐 agent 后端启动于 %s（HTTP 明文——仅限本地开发）（已加载历史 %d 天）", httpServer.Addr, len(days))
+			err = httpServer.ListenAndServe()
+		}
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("HTTP 服务异常退出: %v", err)
 		}
 	}()
