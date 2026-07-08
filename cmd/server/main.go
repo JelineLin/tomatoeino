@@ -15,7 +15,6 @@ package main
 
 import (
 	"context"
-	"crypto/subtle"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -87,16 +86,21 @@ func main() {
 	mux.HandleFunc("/api/inventory", srv.handleInventory)
 	mux.HandleFunc("/api/chat", srv.handleChat)
 
-	// 鉴权：API_TOKEN 设了就强制校验（公网部署必须设）；没设则放行并醒目告警，
-	// 本地学习跑不受影响。CORS 在最外层，预检 OPTIONS 不带鉴权头也能通过。
-	apiToken := os.Getenv("API_TOKEN")
-	if apiToken == "" {
-		log.Println("⚠️  API_TOKEN 未设置，/api/* 处于无鉴权状态——切勿暴露到公网！")
+	// 鉴权：token → userID（多用户改造第 4 步，三级降级见 users.go）。
+	// CORS 在最外层，预检 OPTIONS 不带鉴权头也能通过。
+	users, err := loadUsers(envOr("USERS_PATH", "data/users.json"), os.Getenv("API_TOKEN"))
+	if err != nil {
+		log.Fatalf("加载用户注册表失败: %v", err)
+	}
+	if users == nil {
+		log.Printf("⚠️  无 users.json 且未设 API_TOKEN，/api/* 无鉴权——切勿暴露公网！所有请求视为用户 %s", defaultUserID)
+	} else {
+		log.Printf("鉴权就绪：%d 个用户、%d 把钥匙", len(users.names), len(users.byHash))
 	}
 
 	httpServer := &http.Server{
 		Addr:    ":" + envOr("PORT", "8080"),
-		Handler: withCORS(withAuth(apiToken, mux)),
+		Handler: withCORS(withAuth(users, mux)),
 		// 只限「读完请求头」的时间，挡掉 slowloris（把连接吊着迟迟不发完头）。
 		// 故意不设 WriteTimeout——SSE 是长连接，设了会把正常的流式回答拦腰截断。
 		ReadHeaderTimeout: 10 * time.Second,
@@ -717,19 +721,25 @@ func withCORS(next http.Handler) http.Handler {
 // withAuth 给 /api/* 加 Bearer Token 校验；/healthz 等其余路径放行（探针不该带密钥）。
 // token 为空 = 鉴权关闭（本地开发模式，main 里已打过警告）。
 // 用常数时间比较抵御计时侧信道——单用户场景其实用不上，但这是养成习惯的成本最低处。
-func withAuth(token string, next http.Handler) http.Handler {
+// withAuth 把 token 解析成 userID 塞进请求 ctx——租户边界的入口（评审定稿：
+// 一次解析、全程隐式，下游 handler/工具对多租户零感知）。
+// users 为 nil 时是无鉴权本地模式：放行并把所有请求视为默认用户。
+func withAuth(users *userRegistry, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if token == "" || !strings.HasPrefix(r.URL.Path, "/api/") {
+		if !strings.HasPrefix(r.URL.Path, "/api/") {
 			next.ServeHTTP(w, r)
 			return
 		}
-		want := "Bearer " + token
-		got := r.Header.Get("Authorization")
-		if subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
-			http.Error(w, "未授权：请求需携带 Authorization: Bearer <API_TOKEN>", http.StatusUnauthorized)
-			return
+		uid := defaultUserID
+		if users != nil {
+			var ok bool
+			uid, ok = users.resolve(r.Header.Get("Authorization"))
+			if !ok {
+				http.Error(w, "未授权：请求需携带 Authorization: Bearer <token>", http.StatusUnauthorized)
+				return
+			}
 		}
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKeyUserID{}, uid)))
 	})
 }
 
