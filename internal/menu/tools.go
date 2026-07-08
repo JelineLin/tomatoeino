@@ -3,7 +3,6 @@ package menu
 import (
 	"context"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
@@ -153,7 +152,7 @@ type searchInput struct {
 func makeSearch(store *vectorstore.Store) func(context.Context, searchInput) (string, error) {
 	return func(ctx context.Context, in searchInput) (string, error) {
 		q := strings.TrimSpace(in.Query)
-		log.Printf("🔧 search_meal_history(query=%q)", q)
+		toolLog(ctx, "search_meal_history(query=%q)", q)
 		if q == "" {
 			return "查询为空，请给一句描述想找什么样的餐。", nil
 		}
@@ -190,7 +189,7 @@ func makeRecent(hs *HistoryStore) func(context.Context, recentInput) (string, er
 		if n > len(days) {
 			n = len(days)
 		}
-		log.Printf("🔧 recent_meals(days=%d)", n)
+		toolLog(ctx, "recent_meals(days=%d)", n)
 		if n == 0 {
 			return "历史为空。", nil
 		}
@@ -214,7 +213,7 @@ type ingredientInput struct {
 func makeFindByIngredient(hs *HistoryStore) func(context.Context, ingredientInput) (string, error) {
 	return func(ctx context.Context, in ingredientInput) (string, error) {
 		kw := strings.TrimSpace(in.Ingredient)
-		log.Printf("🔧 find_by_ingredient(ingredient=%q)", kw)
+		toolLog(ctx, "find_by_ingredient(ingredient=%q)", kw)
 		if kw == "" {
 			return "请给一个要查找的食材或关键词。", nil
 		}
@@ -249,7 +248,7 @@ type askInput struct {
 func makeAskUser() func(context.Context, askInput) (string, error) {
 	return func(ctx context.Context, in askInput) (string, error) {
 		q := strings.TrimSpace(in.Question)
-		log.Printf("🔧 ask_user(question=%q)", q)
+		toolLog(ctx, "ask_user(question=%q)", q)
 		if q == "" {
 			// 别让空问题把整轮变成空白回复。
 			return "想再和家长确认一点信息：请补充一下想吃什么、或家里现有什么食材？", nil
@@ -267,7 +266,7 @@ type invListInput struct {
 func makeListInventory(inv *InventoryStore) func(context.Context, invListInput) (string, error) {
 	return func(ctx context.Context, in invListInput) (string, error) {
 		kw := strings.TrimSpace(in.Keyword)
-		log.Printf("🔧 list_inventory(keyword=%q)", kw)
+		toolLog(ctx, "list_inventory(keyword=%q)", kw)
 		items := inv.List(kw)
 		if len(items) == 0 {
 			if kw == "" {
@@ -291,7 +290,7 @@ type invAddInput struct {
 
 func makeAddInventory(inv *InventoryStore) func(context.Context, invAddInput) (string, error) {
 	return func(ctx context.Context, in invAddInput) (string, error) {
-		log.Printf("🔧 add_inventory(name=%q qty=%v unit=%q)", in.Name, in.Quantity, in.Unit)
+		toolLog(ctx, "add_inventory(name=%q qty=%v unit=%q)", in.Name, in.Quantity, in.Unit)
 		it, err := inv.Add(in.Name, in.Quantity, strings.TrimSpace(in.Unit))
 		if err != nil {
 			// 参数问题用人话还给模型，让它修正后重试，而不是让整轮报错。
@@ -308,7 +307,7 @@ type invConsumeInput struct {
 
 func makeConsumeInventory(inv *InventoryStore) func(context.Context, invConsumeInput) (string, error) {
 	return func(ctx context.Context, in invConsumeInput) (string, error) {
-		log.Printf("🔧 consume_inventory(name=%q qty=%v)", in.Name, in.Quantity)
+		toolLog(ctx, "consume_inventory(name=%q qty=%v)", in.Name, in.Quantity)
 		it, depleted, err := inv.Consume(in.Name, in.Quantity)
 		if err != nil {
 			return "出库失败：" + err.Error(), nil
@@ -342,7 +341,7 @@ type dishInput struct {
 // 失败会留下「索引有、真相无」的幽灵数据，且重启不自愈。
 func makeRecordMeal(hs *HistoryStore, store *vectorstore.Store) func(context.Context, recordMealInput) (string, error) {
 	return func(ctx context.Context, in recordMealInput) (string, error) {
-		log.Printf("🔧 record_meal(date=%s meal=%s dishes=%d)", in.Date, in.Meal, len(in.Dishes))
+		toolLog(ctx, "record_meal(date=%s meal=%s dishes=%d)", in.Date, in.Meal, len(in.Dishes))
 
 		// 校验错误一律用人话 return (msg, nil) 还给模型自纠，沿用 add_inventory 的路数。
 		if _, err := time.Parse("2006-01-02", in.Date); err != nil {

@@ -5,11 +5,12 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/cloudwego/eino/components/embedding"
+	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/flow/agent/react"
 	"github.com/cloudwego/eino/schema"
 
-	"tomatoeino/internal/llm"
 	"tomatoeino/internal/vectorstore"
 )
 
@@ -66,7 +67,12 @@ const systemPersona = `你是一个「幼儿备餐助手」，帮家长依据宝
 //
 // 返回的 *HistoryStore 给 HTTP 层的 /api/history 用（Snapshot），*InventoryStore 给
 // /api/inventory 用——都和 agent 的工具共用同一本账，一份数据两个出口，说法永不打架。
-func BuildAgent(ctx context.Context, historyPath, inventoryPath string) (*react.Agent, *HistoryStore, *InventoryStore, error) {
+//
+// embedder / cm 由调用方注入（多用户改造第 5 步）：它们是进程级共享的重资源
+//（HTTP client + 凭证），不随用户数增长；每次 BuildAgent 只生产「每用户一份」的
+// 轻资产（账本、向量索引、agent 图）。注入也让测试可以塞假实现，全程离线。
+func BuildAgent(ctx context.Context, embedder embedding.Embedder, cm model.ToolCallingChatModel,
+	historyPath, inventoryPath string) (*react.Agent, *HistoryStore, *InventoryStore, error) {
 	// 1. 打开历史账本 + 库存账本（都是带锁可写的 store，record_meal/库存工具会运行时写入）
 	hs, err := NewHistoryStore(historyPath)
 	if err != nil {
@@ -77,21 +83,13 @@ func BuildAgent(ctx context.Context, historyPath, inventoryPath string) (*react.
 		return nil, nil, nil, err
 	}
 
-	// 2. 建 embedder + 向量库，把历史灌进去（一次批量 embedding）
-	embedder, err := llm.NewEmbedder(ctx)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("创建 embedder 失败: %w", err)
-	}
+	// 2. 建向量库，把历史灌进去（一次批量 embedding；空历史零 API 调用）
 	store := vectorstore.New(embedder)
 	if err := store.Add(ctx, BuildDocuments(hs.Snapshot())); err != nil {
 		return nil, nil, nil, fmt.Errorf("把历史灌进向量库失败: %w", err)
 	}
 
-	// 3. 建带工具调用能力的模型 + 工具集
-	cm, err := llm.NewToolCallingChatModel(ctx)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("创建 ToolCallingChatModel 失败: %w", err)
-	}
+	// 3. 工具集
 	tools, err := NewTools(store, hs, inv)
 	if err != nil {
 		return nil, nil, nil, err

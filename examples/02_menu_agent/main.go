@@ -22,6 +22,7 @@ import (
 
 	"github.com/cloudwego/eino/schema"
 
+	"tomatoeino/internal/llm"
 	"tomatoeino/internal/menu"
 )
 
@@ -33,8 +34,17 @@ const inventoryPath = "data/inventory.json"
 func main() {
 	ctx := context.Background()
 
-	// 装配 agent：读历史+库存 → 灌向量库 → 建模型+工具 → ReAct agent。
-	agent, hs, _, err := menu.BuildAgent(ctx, historyPath, inventoryPath)
+	// 装配 agent：连模型的重资源（embedder/chat client）自己建一份，
+	// 再交给 BuildAgent 组装（服务端多用户模式下这两样是进程级共享的）。
+	embedder, err := llm.NewEmbedder(ctx)
+	if err != nil {
+		log.Fatal(err)
+	}
+	cm, err := llm.NewToolCallingChatModel(ctx)
+	if err != nil {
+		log.Fatal(err)
+	}
+	agent, hs, _, err := menu.BuildAgent(ctx, embedder, cm, historyPath, inventoryPath)
 	if err != nil {
 		log.Fatal(err)
 	}

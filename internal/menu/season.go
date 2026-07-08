@@ -10,7 +10,6 @@ package menu
 import (
 	"context"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 )
@@ -149,7 +148,7 @@ func makeSeasonal(now func() time.Time) func(context.Context, seasonInput) (stri
 		if m == 0 {
 			m = int(now().Month())
 		}
-		log.Printf("🔧 seasonal_produce(month=%d)", m)
+		toolLog(ctx, "seasonal_produce(month=%d)", m)
 		if m < 1 || m > 12 {
 			return fmt.Sprintf("月份 %d 不合法，请传 1~12（不传则默认当前月份）。", m), nil
 		}
