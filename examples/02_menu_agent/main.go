@@ -44,10 +44,11 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	agent, hs, _, err := menu.BuildAgent(ctx, embedder, cm, historyPath, inventoryPath)
+	asm, err := menu.BuildAgent(ctx, embedder, cm, historyPath, inventoryPath, "data/profile.json")
 	if err != nil {
 		log.Fatal(err)
 	}
+	agent, hs := asm.Agent, asm.History
 	fmt.Printf("已加载历史 %d 天，agent 就绪。\n\n", len(hs.Snapshot()))
 
 	// 命令行参数即问题；没传就用一个示例问题。

@@ -33,7 +33,8 @@ type workspace struct {
 	agent    *react.Agent
 	history  *menu.HistoryStore
 	inv      *menu.InventoryStore
-	sessions *sessionStore // L2 会话下沉到 workspace = 天然按用户隔离
+	profile  *menu.ProfileStore // 宝宝档案：动态注入该户 agent 的人设
+	sessions *sessionStore      // L2 会话下沉到 workspace = 天然按用户隔离
 	briefs   *briefStore
 }
 
@@ -127,17 +128,19 @@ func (r *registry) build(ctx context.Context, uid string) (*workspace, error) {
 	dir := filepath.Join(r.dataDir, "users", uid)
 	log.Printf("🏗️  构建用户 %s 的 workspace（%s）…", uid, dir)
 
-	agent, hs, inv, err := menu.BuildAgent(ctx, r.embedder, r.cm,
+	asm, err := menu.BuildAgent(ctx, r.embedder, r.cm,
 		filepath.Join(dir, "history.json"),
-		filepath.Join(dir, "inventory.json"))
+		filepath.Join(dir, "inventory.json"),
+		filepath.Join(dir, "profile.json"))
 	if err != nil {
 		return nil, fmt.Errorf("构建用户 %s 的 workspace 失败: %w", uid, err)
 	}
-	log.Printf("🏗️  用户 %s 就绪（历史 %d 天）", uid, len(hs.Snapshot()))
+	log.Printf("🏗️  用户 %s 就绪（历史 %d 天）", uid, len(asm.History.Snapshot()))
 	return &workspace{
-		agent:    agent,
-		history:  hs,
-		inv:      inv,
+		agent:    asm.Agent,
+		history:  asm.History,
+		inv:      asm.Inv,
+		profile:  asm.Profile,
 		sessions: newSessionStore(sessionTTL),
 		briefs:   &briefStore{},
 	}, nil

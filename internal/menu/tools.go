@@ -41,7 +41,9 @@ const ToolNameAskUser = "ask_user"
 //   - record_meal         ：写历史（采纳入库，见 history.go）——闭环的最后一块：
 //     agent 的推荐被采纳后写回历史，成为下一次推荐的依据；新用户的空历史
 //     也靠它一餐一餐自举出来。
-func NewTools(store *vectorstore.Store, hs *HistoryStore, inv *InventoryStore) ([]tool.BaseTool, error) {
+//   - update_profile      ：写档案（见 profile.go）——「问一次就该记住」的宝宝
+//     基础信息（生日/过敏/忌口），记完自动注入人设，没有对应的查询工具。
+func NewTools(store *vectorstore.Store, hs *HistoryStore, inv *InventoryStore, ps *ProfileStore) ([]tool.BaseTool, error) {
 	searchTool, err := utils.InferTool(
 		"search_meal_history",
 		"按语义检索宝宝的历史菜单：传入一句自然语言（如『清淡的鱼类晚餐』『不重样的午餐』），"+
@@ -134,9 +136,20 @@ func NewTools(store *vectorstore.Store, hs *HistoryStore, inv *InventoryStore) (
 		return nil, fmt.Errorf("创建 record_meal 工具失败: %w", err)
 	}
 
+	profileTool, err := utils.InferTool(
+		"update_profile",
+		"更新宝宝档案（生日/过敏原/忌口/要点）。家长提到这些信息时调用；只传要更新的字段，"+
+			"没提到的不传（保持原值）。注意 allergies/dislikes 是整组覆盖：修改时必须把要保留的"+
+			"项一起带全。家长说月龄的，按今天的日期换算成出生日期。",
+		makeUpdateProfile(ps),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("创建 update_profile 工具失败: %w", err)
+	}
+
 	return []tool.BaseTool{
 		searchTool, recentTool, ingredientTool, seasonTool, askTool,
-		listInvTool, addInvTool, consumeInvTool, recordTool,
+		listInvTool, addInvTool, consumeInvTool, recordTool, profileTool,
 	}, nil
 }
 
@@ -381,6 +394,74 @@ func makeRecordMeal(hs *HistoryStore, store *vectorstore.Store) func(context.Con
 		}
 		return fmt.Sprintf("%s %s 的%s（%d 道菜）。", verb, in.Date, mealLabelOf(in.Meal), len(dishes)), nil
 	}
+}
+
+// ---- update_profile（建档）----
+
+type profileInput struct {
+	BabyName  string   `json:"baby_name" jsonschema:"description=宝宝称呼；不改就不传"`
+	BirthDate string   `json:"birth_date" jsonschema:"description=出生日期 YYYY-MM-DD（家长说月龄时由你按今天换算成出生日期）；不改就不传"`
+	Allergies []string `json:"allergies" jsonschema:"description=过敏原完整清单（整组覆盖：每次必须传全量，漏传的项等于删除）；不改就不传"`
+	Dislikes  []string `json:"dislikes" jsonschema:"description=不吃/不爱吃的完整清单（整组覆盖）；不改就不传"`
+	Notes     string   `json:"notes" jsonschema:"description=其他饮食要点（咀嚼能力/口味倾向等），会整体替换旧备注；不改就不传"`
+}
+
+// makeUpdateProfile 返回「建档/改档」工具。合并语义：没传的字段保持原值，
+// 传了的整体替换（数组是整组覆盖，与 record_meal 的整餐覆盖同一套哲学——
+// 部分修改的合并规则太容易和模型的理解错位，整组覆盖 + 描述里写明最不容易错账）。
+func makeUpdateProfile(ps *ProfileStore) func(context.Context, profileInput) (string, error) {
+	return func(ctx context.Context, in profileInput) (string, error) {
+		toolLog(ctx, "update_profile(name=%q birth=%q allergies=%d dislikes=%d)",
+			in.BabyName, in.BirthDate, len(in.Allergies), len(in.Dislikes))
+
+		// 空调用在输入层就拒绝——不能因为档案本来有内容就把无操作当成功。
+		if in.BabyName == "" && in.BirthDate == "" && in.Allergies == nil &&
+			in.Dislikes == nil && in.Notes == "" {
+			return "建档失败：至少要提供一项要更新的信息。", nil
+		}
+
+		if in.BirthDate != "" {
+			t, err := time.Parse("2006-01-02", in.BirthDate)
+			if err != nil {
+				return fmt.Sprintf("建档失败：出生日期 %q 不是 YYYY-MM-DD 格式。", in.BirthDate), nil
+			}
+			if t.After(time.Now()) {
+				return fmt.Sprintf("建档失败：出生日期 %s 在未来，请确认后重试。", in.BirthDate), nil
+			}
+		}
+
+		p := ps.Get()
+		if in.BabyName != "" {
+			p.BabyName = strings.TrimSpace(in.BabyName)
+		}
+		if in.BirthDate != "" {
+			p.BirthDate = in.BirthDate
+		}
+		if in.Allergies != nil {
+			p.Allergies = trimAll(in.Allergies)
+		}
+		if in.Dislikes != nil {
+			p.Dislikes = trimAll(in.Dislikes)
+		}
+		if in.Notes != "" {
+			p.Notes = strings.TrimSpace(in.Notes)
+		}
+		if err := ps.Set(p); err != nil {
+			return "建档失败：" + err.Error(), nil
+		}
+		return "已更新宝宝档案。" + renderProfile(p, time.Now()), nil
+	}
+}
+
+// trimAll 逐项去空白、丢空串。
+func trimAll(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if t := strings.TrimSpace(s); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // mealContains 判断一餐里有没有哪道菜的菜名/明细含关键词。

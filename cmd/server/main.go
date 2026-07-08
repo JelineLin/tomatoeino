@@ -103,6 +103,7 @@ func main() {
 	mux.HandleFunc("/api/seasonal", srv.handleSeasonal)
 	mux.HandleFunc("/api/brief", srv.handleBrief)
 	mux.HandleFunc("/api/inventory", srv.handleInventory)
+	mux.HandleFunc("/api/profile", srv.handleProfile)
 	mux.HandleFunc("/api/chat", srv.handleChat)
 
 	httpServer := &http.Server{
@@ -218,6 +219,24 @@ func (s *server) handleInventory(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	if err := json.NewEncoder(w).Encode(ws.inv.List(r.URL.Query().Get("keyword"))); err != nil {
 		log.Printf("/api/inventory 编码失败: %v", err)
+	}
+}
+
+// handleProfile 返回宝宝档案，给前端展示/确认用。
+// 和其它账本一样：写入口收敛在聊天（update_profile 工具），这里只读。
+func (s *server) handleProfile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "只支持 GET", http.StatusMethodNotAllowed)
+		return
+	}
+	ws, err := s.ws(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if err := json.NewEncoder(w).Encode(ws.profile.Get()); err != nil {
+		log.Printf("/api/profile 编码失败: %v", err)
 	}
 }
 
