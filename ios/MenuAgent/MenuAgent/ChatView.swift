@@ -46,6 +46,8 @@ final class ChatViewModel: ObservableObject {
 
 struct ChatView: View {
     @StateObject private var vm = ChatViewModel()
+    // 输入框焦点。有了它键盘才收得回：下拉列表、发送、点空白都靠把它置 false。
+    @FocusState private var inputFocused: Bool
 
     var body: some View {
         NavigationStack {
@@ -72,6 +74,11 @@ struct ChatView: View {
                 }
                 .padding()
             }
+            // 下拉滚动时跟手收起键盘——这是聊天类 app 收键盘最自然的手势。
+            .scrollDismissesKeyboard(.interactively)
+            // 点消息区空白也收键盘（滚不动的短对话里，下拉手势用不上，得有个兜底）。
+            .contentShape(Rectangle())
+            .onTapGesture { inputFocused = false }
             // 思考流和答案流都会让气泡长高，两者任一有增量就跟着滚到底。
             .onChange(of: vm.messages.last.map { $0.thinking + $0.text }) { _ in
                 if let last = vm.messages.last {
@@ -108,6 +115,7 @@ struct ChatView: View {
 
     private func suggestionChip(_ text: String) -> some View {
         Button {
+            inputFocused = false
             vm.input = text
             Task { await vm.send() }
         } label: {
@@ -125,20 +133,27 @@ struct ChatView: View {
         !vm.isSending && !vm.input.trimmingCharacters(in: .whitespaces).isEmpty
     }
 
+    // send 统一入口：先收键盘再发，避免发送后键盘赖着不走、挡住刚冒出来的回答。
+    private func send() {
+        inputFocused = false
+        Task { await vm.send() }
+    }
+
     private var inputBar: some View {
         HStack(spacing: 10) {
             TextField("说点什么…", text: $vm.input, axis: .vertical)
                 .lineLimit(1...4)
+                .focused($inputFocused)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 9)
                 .background(
                     RoundedRectangle(cornerRadius: 20, style: .continuous)
                         .fill(Color(.secondarySystemBackground))
                 )
-                .onSubmit { Task { await vm.send() } }
+                .onSubmit { send() }
 
             Button {
-                Task { await vm.send() }
+                send()
             } label: {
                 Group {
                     if vm.isSending {
