@@ -34,6 +34,40 @@ func (d Day) mealOf(field string) *Meal {
 	}
 }
 
+// setMeal 按 field 放入某天对应的那一餐。换指针、不改旧 Meal 内容——
+// HistoryStore.Snapshot 浅拷贝的一致性依赖这一点。未知 field 静默忽略，
+// 合法性由上游 validMealField 把关。
+func (d *Day) setMeal(field string, m *Meal) {
+	switch field {
+	case "lunch":
+		d.Lunch = m
+	case "fruit":
+		d.Fruit = m
+	case "dinner":
+		d.Dinner = m
+	}
+}
+
+// validMealField 判断餐别是否合法（与 mealOrder 同源，不另列一份清单）。
+func validMealField(field string) bool {
+	for _, mk := range mealOrder {
+		if mk.field == field {
+			return true
+		}
+	}
+	return false
+}
+
+// mealLabelOf 取餐别的中文标签（lunch→午餐），未知原样返回兜底。
+func mealLabelOf(field string) string {
+	for _, mk := range mealOrder {
+		if mk.field == field {
+			return mk.label
+		}
+	}
+	return field
+}
+
 // renderMeal 把一餐渲染成一句可读文本，例如：
 //
 //	2025-12-26 晚餐(17:30)：煎三文鱼（1袋）；南瓜米饭（50g米，黄小米1小把）；...
@@ -60,6 +94,21 @@ func renderMeal(date, label string, m *Meal) string {
 	return b.String()
 }
 
+// BuildMealDocument 把「一餐」变成一条可入库的 Document。
+//
+// doc ID = date-mealField —— 这是和 HistoryStore.SetMeal 共用的同一把钥匙：
+// record_meal 覆盖修正时，JSON 侧整餐替换、向量侧同 ID Upsert，两个视图不可能错位。
+func BuildMealDocument(date, mealField string, m *Meal) *schema.Document {
+	return &schema.Document{
+		ID:      date + "-" + mealField,
+		Content: renderMeal(date, mealLabelOf(mealField), m),
+		MetaData: map[string]any{
+			"date":     date,
+			"mealType": mealField,
+		},
+	}
+}
+
 // BuildDocuments 把整段历史摊平成「一餐一条」的 schema.Document。
 //
 // 为什么一餐一条而不是一天一条：检索是「召回最相关的片段」，粒度越细命中越准——
@@ -73,14 +122,7 @@ func BuildDocuments(days []Day) []*schema.Document {
 			if m == nil || len(m.Dishes) == 0 {
 				continue
 			}
-			docs = append(docs, &schema.Document{
-				ID:      d.Date + "-" + mk.field,
-				Content: renderMeal(d.Date, mk.label, m),
-				MetaData: map[string]any{
-					"date":     d.Date,
-					"mealType": mk.field,
-				},
-			})
+			docs = append(docs, BuildMealDocument(d.Date, mk.field, m))
 		}
 	}
 	return docs

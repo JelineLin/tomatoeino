@@ -34,11 +34,11 @@ func main() {
 	ctx := context.Background()
 
 	// 装配 agent：读历史+库存 → 灌向量库 → 建模型+工具 → ReAct agent。
-	agent, days, _, err := menu.BuildAgent(ctx, historyPath, inventoryPath)
+	agent, hs, _, err := menu.BuildAgent(ctx, historyPath, inventoryPath)
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("已加载历史 %d 天，agent 就绪。\n\n", len(days))
+	fmt.Printf("已加载历史 %d 天，agent 就绪。\n\n", len(hs.Snapshot()))
 
 	// 命令行参数即问题；没传就用一个示例问题。
 	question := strings.TrimSpace(strings.Join(os.Args[1:], " "))
