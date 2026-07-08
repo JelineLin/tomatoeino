@@ -49,7 +49,7 @@ const defaultInventoryPath = "data/inventory.json"
 // 可并发处理多个请求，所以这里一个实例全局共享即可。
 type server struct {
 	agent    *react.Agent
-	days     []menu.Day
+	history  *menu.HistoryStore   // 历史账本：和 agent 的查询/record_meal 工具共用
 	inv      *menu.InventoryStore // 家庭库存账本：和 agent 的库存工具共用同一本账
 	sessions *sessionStore        // L2 服务端会话：session_id → 全保真消息史
 	briefs   *briefStore          // L4 每日简报：定时生成，等前端来取
@@ -57,7 +57,7 @@ type server struct {
 
 func main() {
 	// 装配 agent 用一个独立的启动 ctx；服务运行期的取消由下面的信号驱动，两者互不影响。
-	agent, days, inv, err := menu.BuildAgent(context.Background(),
+	agent, hs, inv, err := menu.BuildAgent(context.Background(),
 		envOr("HISTORY_PATH", defaultHistoryPath),
 		envOr("INVENTORY_PATH", defaultInventoryPath))
 	if err != nil {
@@ -65,7 +65,7 @@ func main() {
 	}
 
 	sessions := newSessionStore(sessionTTL)
-	srv := &server{agent: agent, days: days, inv: inv, sessions: sessions, briefs: &briefStore{}}
+	srv := &server{agent: agent, history: hs, inv: inv, sessions: sessions, briefs: &briefStore{}}
 
 	// 会话清扫：周期性清掉过期会话，防内存慢涨。goroutine 随进程退出，不用专门收尾。
 	go func() {
@@ -115,10 +115,10 @@ func main() {
 	go func() {
 		var err error
 		if certFile != "" && keyFile != "" {
-			log.Printf("备餐 agent 后端启动于 %s（HTTPS，已加载历史 %d 天）", httpServer.Addr, len(days))
+			log.Printf("备餐 agent 后端启动于 %s（HTTPS，已加载历史 %d 天）", httpServer.Addr, len(hs.Snapshot()))
 			err = httpServer.ListenAndServeTLS(certFile, keyFile)
 		} else {
-			log.Printf("备餐 agent 后端启动于 %s（HTTP 明文——仅限本地开发）（已加载历史 %d 天）", httpServer.Addr, len(days))
+			log.Printf("备餐 agent 后端启动于 %s（HTTP 明文——仅限本地开发）（已加载历史 %d 天）", httpServer.Addr, len(hs.Snapshot()))
 			err = httpServer.ListenAndServe()
 		}
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -151,7 +151,7 @@ func (s *server) handleHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	if err := json.NewEncoder(w).Encode(s.days); err != nil {
+	if err := json.NewEncoder(w).Encode(s.history.Snapshot()); err != nil {
 		log.Printf("/api/history 编码失败: %v", err)
 	}
 }

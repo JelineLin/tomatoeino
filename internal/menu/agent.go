@@ -27,9 +27,15 @@ const systemPersona = `你是一个「幼儿备餐助手」，帮家长依据宝
 - 工具：search_meal_history（按语义找相近的餐）、recent_meals（看最近几天吃了啥）、
   find_by_ingredient（按食材精确找）、seasonal_produce（查当月应季食材）、
   list_inventory（查家庭库存）、add_inventory（食材入库）、consume_inventory（食材出库）、
-  ask_user（向家长提问，仅当缺少家长才知道的信息时用）。查询类工具可多次、组合调用。
+  record_meal（把一餐写进历史）、ask_user（向家长提问，仅当缺少家长才知道的信息时用）。
+  查询类工具可多次、组合调用。
 - 记账职责：家长说「买了 X」就 add_inventory 入库、「用掉了/吃完了 X」就 consume_inventory
   出库——份数、单位按家长说的如实记，多种食材就逐一调用，记完简短复述账目变化。
+- 记餐职责：家长【明确采纳你的推荐】（说「就按这个做」「采纳」「好就这个」）或
+  【报告实际吃了什么】（说「今天中午吃了 X」）时，你必须调用 record_meal 把整餐写进历史——
+  date 用具体日期（「今天/昨天/明天」按今天的日期换算），dishes 带全该餐所有菜。
+  同天同餐再次记录是整餐覆盖：家长补充或修改时，必须把要保留的旧菜和新菜一起带上。
+  只有家长明确采纳/报告过的餐才记，你自己给的推荐【绝不】主动入库。记完简短复述记了什么。
 - 例外：如果上下文里出现【工具备忘】，那是你上一轮亲自调用工具查到的真实数据——
   本轮可以直接引用它作答，不必为同样的数据重复调用工具；只有备忘不够回答本轮问题、
   或数据可能过期时才再调工具。
@@ -58,11 +64,11 @@ const systemPersona = `你是一个「幼儿备餐助手」，帮家长依据宝
 //	                                                         │
 //	ToolCallingChatModel + Tools(含 Store) ──react.NewAgent──▶ *react.Agent
 //
-// 返回的 []Day 给 HTTP 层的 /api/history 直接用；*InventoryStore 给 /api/inventory
-// 直接用（和 agent 的库存工具共用同一本账，一份数据两个出口，说法永不打架）。
-func BuildAgent(ctx context.Context, historyPath, inventoryPath string) (*react.Agent, []Day, *InventoryStore, error) {
-	// 1. 读历史 + 打开库存账本
-	days, err := LoadHistory(historyPath)
+// 返回的 *HistoryStore 给 HTTP 层的 /api/history 用（Snapshot），*InventoryStore 给
+// /api/inventory 用——都和 agent 的工具共用同一本账，一份数据两个出口，说法永不打架。
+func BuildAgent(ctx context.Context, historyPath, inventoryPath string) (*react.Agent, *HistoryStore, *InventoryStore, error) {
+	// 1. 打开历史账本 + 库存账本（都是带锁可写的 store，record_meal/库存工具会运行时写入）
+	hs, err := NewHistoryStore(historyPath)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -77,7 +83,7 @@ func BuildAgent(ctx context.Context, historyPath, inventoryPath string) (*react.
 		return nil, nil, nil, fmt.Errorf("创建 embedder 失败: %w", err)
 	}
 	store := vectorstore.New(embedder)
-	if err := store.Add(ctx, BuildDocuments(days)); err != nil {
+	if err := store.Add(ctx, BuildDocuments(hs.Snapshot())); err != nil {
 		return nil, nil, nil, fmt.Errorf("把历史灌进向量库失败: %w", err)
 	}
 
@@ -86,7 +92,7 @@ func BuildAgent(ctx context.Context, historyPath, inventoryPath string) (*react.
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("创建 ToolCallingChatModel 失败: %w", err)
 	}
-	tools, err := NewTools(store, days, inv)
+	tools, err := NewTools(store, hs, inv)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -115,5 +121,5 @@ func BuildAgent(ctx context.Context, historyPath, inventoryPath string) (*react.
 		return nil, nil, nil, fmt.Errorf("创建 ReAct agent 失败: %w", err)
 	}
 
-	return agent, days, inv, nil
+	return agent, hs, inv, nil
 }

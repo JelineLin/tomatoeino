@@ -10,6 +10,7 @@ import (
 	"github.com/cloudwego/eino/components/retriever"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
+	"github.com/cloudwego/eino/schema"
 
 	"tomatoeino/internal/vectorstore"
 )
@@ -38,7 +39,10 @@ const ToolNameAskUser = "ask_user"
 //   - ask_user            ：人机交互（向家长提问并中断本轮，见 ToolNameAskUser）
 //   - list/add/consume_inventory：有状态读写（家庭库存账本，见 inventory.go）——
 //     前面全是「读世界」，这三个开始「写世界」，agent 从顾问变成管家。
-func NewTools(store *vectorstore.Store, days []Day, inv *InventoryStore) ([]tool.BaseTool, error) {
+//   - record_meal         ：写历史（采纳入库，见 history.go）——闭环的最后一块：
+//     agent 的推荐被采纳后写回历史，成为下一次推荐的依据；新用户的空历史
+//     也靠它一餐一餐自举出来。
+func NewTools(store *vectorstore.Store, hs *HistoryStore, inv *InventoryStore) ([]tool.BaseTool, error) {
 	searchTool, err := utils.InferTool(
 		"search_meal_history",
 		"按语义检索宝宝的历史菜单：传入一句自然语言（如『清淡的鱼类晚餐』『不重样的午餐』），"+
@@ -53,7 +57,7 @@ func NewTools(store *vectorstore.Store, days []Day, inv *InventoryStore) ([]tool
 		"recent_meals",
 		"取最近 N 天的完整菜单（午餐/水果/晚餐），按日期返回。适合『这几天吃了啥』"+
 			"『安排明天的别和最近重样』这类需要看近期记录的需求。",
-		makeRecent(days),
+		makeRecent(hs),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("创建 recent_meals 工具失败: %w", err)
@@ -63,7 +67,7 @@ func NewTools(store *vectorstore.Store, days []Day, inv *InventoryStore) ([]tool
 		"find_by_ingredient",
 		"按食材/关键词精确查找历史上含它的餐次（在菜名和做法明细里做子串匹配），"+
 			"如查『鳕鱼』『羊肚菌』『西兰花』。适合『最近吃过哪些鱼』『上次羊肚菌怎么做的』。",
-		makeFindByIngredient(days),
+		makeFindByIngredient(hs),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("创建 find_by_ingredient 工具失败: %w", err)
@@ -120,9 +124,20 @@ func NewTools(store *vectorstore.Store, days []Day, inv *InventoryStore) ([]tool
 		return nil, fmt.Errorf("创建 consume_inventory 工具失败: %w", err)
 	}
 
+	recordTool, err := utils.InferTool(
+		"record_meal",
+		"把一餐写进宝宝的吃饭历史。仅在家长【明确采纳你的推荐】（如「就按这个做」「采纳」）"+
+			"或【报告实际吃了什么】（如「今天中午吃了番茄面」）时调用；你自己给的推荐绝不主动入库。"+
+			"注意整餐覆盖：同一天同一餐再次记录会完全替换旧记录——修改时必须把要保留的菜一起带上。",
+		makeRecordMeal(hs, store),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("创建 record_meal 工具失败: %w", err)
+	}
+
 	return []tool.BaseTool{
 		searchTool, recentTool, ingredientTool, seasonTool, askTool,
-		listInvTool, addInvTool, consumeInvTool,
+		listInvTool, addInvTool, consumeInvTool, recordTool,
 	}, nil
 }
 
@@ -163,9 +178,11 @@ type recentInput struct {
 	Days int `json:"days" jsonschema:"description=要回看的天数，建议 3~7；不传或<=0 按 3 天,required"`
 }
 
-// makeRecent 捕获历史切片。history.json 是按日期升序排的，所以「最近 N 天」就是取尾部。
-func makeRecent(days []Day) func(context.Context, recentInput) (string, error) {
+// makeRecent 捕获历史账本（不是切片快照！）——每次调用现取 Snapshot，
+// record_meal 刚写进去的餐立刻可见，不会看到旧世界。升序存储，「最近 N 天」=取尾部。
+func makeRecent(hs *HistoryStore) func(context.Context, recentInput) (string, error) {
 	return func(ctx context.Context, in recentInput) (string, error) {
+		days := hs.Snapshot()
 		n := in.Days
 		if n <= 0 {
 			n = 3
@@ -193,7 +210,8 @@ type ingredientInput struct {
 }
 
 // makeFindByIngredient 在所有菜的「菜名 + 明细」里做子串匹配，命中就把那一餐整条带出来。
-func makeFindByIngredient(days []Day) func(context.Context, ingredientInput) (string, error) {
+// 同样捕获账本、现取快照——新记的餐立刻可查。
+func makeFindByIngredient(hs *HistoryStore) func(context.Context, ingredientInput) (string, error) {
 	return func(ctx context.Context, in ingredientInput) (string, error) {
 		kw := strings.TrimSpace(in.Ingredient)
 		log.Printf("🔧 find_by_ingredient(ingredient=%q)", kw)
@@ -201,7 +219,7 @@ func makeFindByIngredient(days []Day) func(context.Context, ingredientInput) (st
 			return "请给一个要查找的食材或关键词。", nil
 		}
 		var hits []string
-		for _, d := range days {
+		for _, d := range hs.Snapshot() {
 			for _, mk := range mealOrder {
 				m := d.mealOf(mk.field)
 				if m == nil {
@@ -299,6 +317,70 @@ func makeConsumeInventory(inv *InventoryStore) func(context.Context, invConsumeI
 			return fmt.Sprintf("已出库。%s 用完了（账上清零出清）。", it.Name), nil
 		}
 		return fmt.Sprintf("已出库。%s 还剩 %s%s。", it.Name, fmtQty(it.Quantity), it.Unit), nil
+	}
+}
+
+// ---- record_meal（采纳入库）----
+
+type recordMealInput struct {
+	Date   string      `json:"date" jsonschema:"description=餐次日期 YYYY-MM-DD。家长说「今天/昨天/明天」时由你按今天的日期换算成具体日期,required"`
+	Meal   string      `json:"meal" jsonschema:"description=餐别，只能是 lunch/fruit/dinner 之一,required"`
+	Time   string      `json:"time" jsonschema:"description=可选，用餐时刻如 12:00，不知道就不传"`
+	Dishes []dishInput `json:"dishes" jsonschema:"description=这一餐的全部菜品。整餐覆盖：同天同餐再次记录会完全替换旧记录，修改时要把保留的菜也一起带上,required"`
+}
+
+type dishInput struct {
+	Name   string `json:"name" jsonschema:"description=菜名,required"`
+	Detail string `json:"detail" jsonschema:"description=做法/分量要点，没有可不传"`
+}
+
+// makeRecordMeal 返回「采纳入库」工具——历史的写入口。
+//
+// 写入顺序刻意是【JSON 先、向量后】：JSON+内存是唯一真相源，向量索引本来就是
+// 启动时从 JSON 全量重建的派生视图——派生视图写失败不回滚真相，如实告知模型、
+// 靠下次重启重建自愈。这比两阶段提交诚实且便宜。绝不能反过来：先写索引后写 JSON，
+// 失败会留下「索引有、真相无」的幽灵数据，且重启不自愈。
+func makeRecordMeal(hs *HistoryStore, store *vectorstore.Store) func(context.Context, recordMealInput) (string, error) {
+	return func(ctx context.Context, in recordMealInput) (string, error) {
+		log.Printf("🔧 record_meal(date=%s meal=%s dishes=%d)", in.Date, in.Meal, len(in.Dishes))
+
+		// 校验错误一律用人话 return (msg, nil) 还给模型自纠，沿用 add_inventory 的路数。
+		if _, err := time.Parse("2006-01-02", in.Date); err != nil {
+			return fmt.Sprintf("入库失败：日期 %q 不是 YYYY-MM-DD 格式，请换算成具体日期再试。", in.Date), nil
+		}
+		if !validMealField(in.Meal) {
+			return fmt.Sprintf("入库失败：餐别 %q 无效，只能是 lunch/fruit/dinner。", in.Meal), nil
+		}
+		dishes := make([]Dish, 0, len(in.Dishes))
+		for _, d := range in.Dishes {
+			name := strings.TrimSpace(d.Name)
+			if name == "" {
+				continue
+			}
+			dishes = append(dishes, Dish{Name: name, Detail: strings.TrimSpace(d.Detail)})
+		}
+		if len(dishes) == 0 {
+			return "入库失败：这一餐至少要有一道菜（dishes 为空）。", nil
+		}
+
+		m := Meal{Time: strings.TrimSpace(in.Time), Dishes: dishes}
+
+		// ① 权威视图：JSON + 内存。成功即「真相已记」。
+		replaced, err := hs.SetMeal(in.Date, in.Meal, m)
+		if err != nil {
+			return "入库失败：" + err.Error(), nil
+		}
+
+		// ② 派生视图：向量索引按同一把钥匙（date-mealField）Upsert，旧向量不留尸体。
+		if err := store.Upsert(ctx, []*schema.Document{BuildMealDocument(in.Date, in.Meal, &m)}); err != nil {
+			return fmt.Sprintf("已记入历史，但语义索引更新失败（服务重启后会自愈）：%v", err), nil
+		}
+
+		verb := "已记录"
+		if replaced {
+			verb = "已覆盖更新"
+		}
+		return fmt.Sprintf("%s %s 的%s（%d 道菜）。", verb, in.Date, mealLabelOf(in.Meal), len(dishes)), nil
 	}
 }
 

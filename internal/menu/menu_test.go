@@ -137,7 +137,7 @@ func TestBuildDocuments(t *testing.T) {
 
 func TestMakeRecent(t *testing.T) {
 	ctx := context.Background()
-	recent := makeRecent(sample)
+	recent := makeRecent(storeFromDays(sample))
 
 	// days<=0 默认回看 3 天；本例正好 3 天，应含全部日期。
 	out, err := recent(ctx, recentInput{Days: 0})
@@ -165,7 +165,7 @@ func TestMakeRecent(t *testing.T) {
 	}
 
 	// 空历史应给出友好提示而非崩。
-	empty := makeRecent(nil)
+	empty := makeRecent(storeFromDays(nil))
 	if out, _ := empty(ctx, recentInput{Days: 3}); !strings.Contains(out, "历史为空") {
 		t.Errorf("空历史应提示「历史为空」，实际：%q", out)
 	}
@@ -173,7 +173,7 @@ func TestMakeRecent(t *testing.T) {
 
 func TestMakeFindByIngredient(t *testing.T) {
 	ctx := context.Background()
-	find := makeFindByIngredient(sample)
+	find := makeFindByIngredient(storeFromDays(sample))
 
 	// 命中菜名。
 	if out, _ := find(ctx, ingredientInput{Ingredient: "鳕鱼"}); !strings.Contains(out, "鳕鱼粥") {
