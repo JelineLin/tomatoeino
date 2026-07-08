@@ -15,7 +15,6 @@ package main
 
 import (
 	"context"
-	"crypto/subtle"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -35,49 +34,68 @@ import (
 	"github.com/cloudwego/eino/flow/agent/react"
 	"github.com/cloudwego/eino/schema"
 
+	"tomatoeino/internal/llm"
 	"tomatoeino/internal/menu"
 )
 
-// defaultHistoryPath 是 history.json 相对仓库根目录的位置，可用 HISTORY_PATH 覆盖。
-const defaultHistoryPath = "examples/02_menu_agent/data/history.json"
-
-// defaultInventoryPath 是库存账本落盘位置（运行时数据，已 gitignore），
-// 可用 INVENTORY_PATH 覆盖。
-const defaultInventoryPath = "data/inventory.json"
-
-// server 持有装配好的 agent 和历史数据。agent 内部是编译好的 eino 图，
-// 可并发处理多个请求，所以这里一个实例全局共享即可。
+// server 持有 workspace 注册表——每个用户一整套 agent/账本/会话/简报，
+// 按 userID 懒加载（见 workspace.go）。handler 里一律先 s.ws(r) 取当前用户的世界。
 type server struct {
-	agent    *react.Agent
-	history  *menu.HistoryStore   // 历史账本：和 agent 的查询/record_meal 工具共用
-	inv      *menu.InventoryStore // 家庭库存账本：和 agent 的库存工具共用同一本账
-	sessions *sessionStore        // L2 服务端会话：session_id → 全保真消息史
-	briefs   *briefStore          // L4 每日简报：定时生成，等前端来取
+	reg *registry
 }
 
 func main() {
-	// 装配 agent 用一个独立的启动 ctx；服务运行期的取消由下面的信号驱动，两者互不影响。
-	agent, hs, inv, err := menu.BuildAgent(context.Background(),
-		envOr("HISTORY_PATH", defaultHistoryPath),
-		envOr("INVENTORY_PATH", defaultInventoryPath))
+	ctx0 := context.Background()
+
+	// 1. 鉴权：token → userID（三级降级见 users.go）。
+	users, err := loadUsers(envOr("USERS_PATH", "data/users.json"), os.Getenv("API_TOKEN"))
 	if err != nil {
-		log.Fatalf("装配 agent 失败: %v", err)
+		log.Fatalf("加载用户注册表失败: %v", err)
+	}
+	if users == nil {
+		log.Printf("⚠️  无 users.json 且未设 API_TOKEN，/api/* 无鉴权——切勿暴露公网！所有请求视为用户 %s", defaultUserID)
+	} else {
+		log.Printf("鉴权就绪：%d 个用户、%d 把钥匙", len(users.names), len(users.byHash))
 	}
 
-	sessions := newSessionStore(sessionTTL)
-	srv := &server{agent: agent, history: hs, inv: inv, sessions: sessions, briefs: &briefStore{}}
+	// 2. 进程级共享的重资源：embedder + chat client 只建一份，注入给所有 workspace。
+	embedder, err := llm.NewEmbedder(ctx0)
+	if err != nil {
+		log.Fatalf("创建 embedder 失败: %v", err)
+	}
+	cm, err := llm.NewToolCallingChatModel(ctx0)
+	if err != nil {
+		log.Fatalf("创建 ToolCallingChatModel 失败: %v", err)
+	}
 
-	// 会话清扫：周期性清掉过期会话，防内存慢涨。goroutine 随进程退出，不用专门收尾。
+	// 3. workspace 注册表：数据在 DATA_DIR/users/<uid>/ 下，按需懒构建。
+	//    进程启动不再等全量 embed——毫秒级起服，谁来了建谁的。
+	reg := newRegistry(envOr("DATA_DIR", "data"), users, embedder, cm)
+	srv := &server{reg: reg}
+
+	// 会话清扫：全局 ticker 遍历所有已建 workspace。goroutine 随进程退出。
 	go func() {
 		t := time.NewTicker(sessionSweepPeriod)
 		defer t.Stop()
 		for range t.C {
-			sessions.sweep()
+			reg.forEach(func(_ string, ws *workspace) { ws.sessions.sweep() })
 		}
 	}()
 
 	// L4：每日简报调度（默认早上 7 点，DAILY_BRIEF_AT 覆盖，off 关闭）。
+	// 多用户模式下逐户串行生成，顺手兼任每日预热。
 	go srv.runBriefScheduler(envOr("DAILY_BRIEF_AT", "07:00"))
+
+	// 启动预热：后台串行构建全部用户的 workspace（每户全量 embed 十几秒）。
+	// 服务已经在监听了——已热用户随到随服务，没热的首访最多等一次 singleflight 构建。
+	go func() {
+		for _, uid := range reg.allUIDs() {
+			if _, err := reg.get(context.Background(), uid); err != nil {
+				log.Printf("🏗️  预热用户 %s 失败: %v", uid, err)
+			}
+		}
+		log.Printf("🏗️  全部用户预热完成")
+	}()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", srv.handleHealth)
@@ -85,18 +103,12 @@ func main() {
 	mux.HandleFunc("/api/seasonal", srv.handleSeasonal)
 	mux.HandleFunc("/api/brief", srv.handleBrief)
 	mux.HandleFunc("/api/inventory", srv.handleInventory)
+	mux.HandleFunc("/api/profile", srv.handleProfile)
 	mux.HandleFunc("/api/chat", srv.handleChat)
-
-	// 鉴权：API_TOKEN 设了就强制校验（公网部署必须设）；没设则放行并醒目告警，
-	// 本地学习跑不受影响。CORS 在最外层，预检 OPTIONS 不带鉴权头也能通过。
-	apiToken := os.Getenv("API_TOKEN")
-	if apiToken == "" {
-		log.Println("⚠️  API_TOKEN 未设置，/api/* 处于无鉴权状态——切勿暴露到公网！")
-	}
 
 	httpServer := &http.Server{
 		Addr:    ":" + envOr("PORT", "8080"),
-		Handler: withCORS(withAuth(apiToken, mux)),
+		Handler: withCORS(withAuth(users, mux)),
 		// 只限「读完请求头」的时间，挡掉 slowloris（把连接吊着迟迟不发完头）。
 		// 故意不设 WriteTimeout——SSE 是长连接，设了会把正常的流式回答拦腰截断。
 		ReadHeaderTimeout: 10 * time.Second,
@@ -115,10 +127,10 @@ func main() {
 	go func() {
 		var err error
 		if certFile != "" && keyFile != "" {
-			log.Printf("备餐 agent 后端启动于 %s（HTTPS，已加载历史 %d 天）", httpServer.Addr, len(hs.Snapshot()))
+			log.Printf("备餐 agent 后端启动于 %s（HTTPS，workspace 按用户懒加载）", httpServer.Addr)
 			err = httpServer.ListenAndServeTLS(certFile, keyFile)
 		} else {
-			log.Printf("备餐 agent 后端启动于 %s（HTTP 明文——仅限本地开发）（已加载历史 %d 天）", httpServer.Addr, len(hs.Snapshot()))
+			log.Printf("备餐 agent 后端启动于 %s（HTTP 明文——仅限本地开发，workspace 按用户懒加载）", httpServer.Addr)
 			err = httpServer.ListenAndServe()
 		}
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -144,14 +156,25 @@ func (s *server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	_, _ = io.WriteString(w, "ok")
 }
 
+// ws 取当前请求用户的 workspace（懒构建；首次要全量 embed，几秒到十几秒）。
+// uid 来自 withAuth 塞进 ctx 的身份——handler 自己永远不碰 token。
+func (s *server) ws(r *http.Request) (*workspace, error) {
+	return s.reg.get(r.Context(), userIDFrom(r))
+}
+
 // handleHistory 直接把 []Day JSON 返回——前端历史 tab 拿去渲染。
 func (s *server) handleHistory(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "只支持 GET", http.StatusMethodNotAllowed)
 		return
 	}
+	ws, err := s.ws(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	if err := json.NewEncoder(w).Encode(s.history.Snapshot()); err != nil {
+	if err := json.NewEncoder(w).Encode(ws.history.Snapshot()); err != nil {
 		log.Printf("/api/history 编码失败: %v", err)
 	}
 }
@@ -188,9 +211,32 @@ func (s *server) handleInventory(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "只支持 GET", http.StatusMethodNotAllowed)
 		return
 	}
+	ws, err := s.ws(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	if err := json.NewEncoder(w).Encode(s.inv.List(r.URL.Query().Get("keyword"))); err != nil {
+	if err := json.NewEncoder(w).Encode(ws.inv.List(r.URL.Query().Get("keyword"))); err != nil {
 		log.Printf("/api/inventory 编码失败: %v", err)
+	}
+}
+
+// handleProfile 返回宝宝档案，给前端展示/确认用。
+// 和其它账本一样：写入口收敛在聊天（update_profile 工具），这里只读。
+func (s *server) handleProfile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "只支持 GET", http.StatusMethodNotAllowed)
+		return
+	}
+	ws, err := s.ws(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if err := json.NewEncoder(w).Encode(ws.profile.Get()); err != nil {
+		log.Printf("/api/profile 编码失败: %v", err)
 	}
 }
 
@@ -259,6 +305,15 @@ func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "messages 不能为空", http.StatusBadRequest)
 		return
 	}
+
+	// 当前用户的 workspace：会话、agent 全从这里拿——A 用户拿到 B 的 session_id
+	// 也命不中，因为查的是自己 workspace 里的 map。
+	ws, err := s.ws(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+
 	// L2 输入装配：命中会话 → 服务端全保真历史 + 请求里最后一条 user 做本轮输入；
 	// 未命中（新会话/过期/服务端重启）→ 退回 L1，用客户端带来的全量历史重建
 	//（含备忘注入），并以此为种子开一个新会话。
@@ -267,7 +322,7 @@ func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
 		newTurn []*schema.Message // 本轮结束后要追加进会话的「输入部分」
 	)
 	sessionID := strings.TrimSpace(req.SessionID)
-	hist, hit := s.sessions.get(sessionID)
+	hist, hit := ws.sessions.get(sessionID)
 	last := req.Messages[len(req.Messages)-1]
 	if hit && schema.RoleType(last.Role) != schema.Assistant {
 		u := schema.UserMessage(last.Content)
@@ -299,7 +354,7 @@ func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
 	// WithMessageFuture 让 agent 把每一步产生的消息（含中间轮）异步交给 future，
 	// 主流照旧只吐最终答案。两者共用同一次运行，不会让模型跑两遍。
 	opt, future := react.WithMessageFuture()
-	stream, err := s.agent.Stream(ctx, input, opt)
+	stream, err := ws.agent.Stream(ctx, input, opt)
 	if err != nil {
 		writeSSEError(w, flusher, "启动失败: "+err.Error())
 		writeSSEDone(w, flusher)
@@ -369,7 +424,7 @@ func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
 	if ans := answerBuf.String(); ans != "" {
 		turn = append(turn, schema.AssistantMessage(ans, nil))
 	}
-	s.sessions.append(sessionID, completeToolCalls(turn))
+	ws.sessions.append(sessionID, completeToolCalls(turn))
 	writeSSEEvent(w, flusher, sseEvent{Type: "session", Text: sessionID})
 
 	// L1 备忘照发：会话丢了（过期/重启）时客户端靠它降级，连续性不断崖。
@@ -717,19 +772,30 @@ func withCORS(next http.Handler) http.Handler {
 // withAuth 给 /api/* 加 Bearer Token 校验；/healthz 等其余路径放行（探针不该带密钥）。
 // token 为空 = 鉴权关闭（本地开发模式，main 里已打过警告）。
 // 用常数时间比较抵御计时侧信道——单用户场景其实用不上，但这是养成习惯的成本最低处。
-func withAuth(token string, next http.Handler) http.Handler {
+// withAuth 把 token 解析成 userID 塞进请求 ctx——租户边界的入口（评审定稿：
+// 一次解析、全程隐式，下游 handler/工具对多租户零感知）。
+// users 为 nil 时是无鉴权本地模式：放行并把所有请求视为默认用户。
+func withAuth(users *userRegistry, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if token == "" || !strings.HasPrefix(r.URL.Path, "/api/") {
+		if !strings.HasPrefix(r.URL.Path, "/api/") {
 			next.ServeHTTP(w, r)
 			return
 		}
-		want := "Bearer " + token
-		got := r.Header.Get("Authorization")
-		if subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
-			http.Error(w, "未授权：请求需携带 Authorization: Bearer <API_TOKEN>", http.StatusUnauthorized)
-			return
+		uid := defaultUserID
+		if users != nil {
+			var ok bool
+			uid, ok = users.resolve(r.Header.Get("Authorization"))
+			if !ok {
+				http.Error(w, "未授权：请求需携带 Authorization: Bearer <token>", http.StatusUnauthorized)
+				return
+			}
 		}
-		next.ServeHTTP(w, r)
+		// 顺手发一个请求级 trace-id：ctx 会被 eino 原样带进每个工具（tool_node 的
+		// InvokableRun(ctx,...)），一轮对话的所有 🔧 日志由它串成一条链——
+		// 这就是「ctx 贯穿编译图」那节课的低风险落地（丢了只缺日志，不担正确性）。
+		ctx := context.WithValue(r.Context(), ctxKeyUserID{}, uid)
+		ctx = menu.WithTraceID(ctx, shortID(newSessionID()))
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 

@@ -66,11 +66,11 @@ func (b *briefStore) set(d *dailyBrief) {
 	b.brief = d
 }
 
-// generateBrief 跑一次 agent 生成简报并落库。定时器和 ?refresh=1 共用这一条路。
-// 用 Generate（非流式）：没有客户端在等打字机，一次拿全量最省事。
-func (s *server) generateBrief(ctx context.Context) (*dailyBrief, error) {
-	log.Printf("⏰ 开始生成今日简报…")
-	msg, err := s.agent.Generate(ctx, []*schema.Message{schema.UserMessage(briefPrompt)})
+// generateBrief 跑一次 agent 生成简报并落库（多用户后按 workspace 生成）。
+// 定时器和 ?refresh=1 共用这一条路。用 Generate（非流式）：没有客户端在等打字机。
+func generateBrief(ctx context.Context, uid string, ws *workspace) (*dailyBrief, error) {
+	log.Printf("⏰ [%s] 开始生成今日简报…", uid)
+	msg, err := ws.agent.Generate(ctx, []*schema.Message{schema.UserMessage(briefPrompt)})
 	if err != nil {
 		return nil, fmt.Errorf("生成简报失败: %w", err)
 	}
@@ -81,8 +81,8 @@ func (s *server) generateBrief(ctx context.Context) (*dailyBrief, error) {
 		// 而 Swift 的 .iso8601 解码策略不认小数秒——去掉小数两边都省事。
 		GeneratedAt: time.Now().Truncate(time.Second),
 	}
-	s.briefs.set(d)
-	log.Printf("⏰ 今日简报已生成（%d 字）", len([]rune(d.Content)))
+	ws.briefs.set(d)
+	log.Printf("⏰ [%s] 今日简报已生成（%d 字）", uid, len([]rune(d.Content)))
 	return d, nil
 }
 
@@ -94,10 +94,16 @@ func (s *server) handleBrief(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ws, err := s.ws(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+
 	if r.URL.Query().Get("refresh") == "1" {
 		ctx, cancel := context.WithTimeout(r.Context(), briefGenTimeout)
 		defer cancel()
-		d, err := s.generateBrief(ctx)
+		d, err := generateBrief(ctx, userIDFrom(r), ws)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
@@ -106,7 +112,7 @@ func (s *server) handleBrief(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if d := s.briefs.get(); d != nil {
+	if d := ws.briefs.get(); d != nil {
 		writeBriefJSON(w, d) // 可能是昨天的——Date 字段带着，新鲜度让前端自己判断
 		return
 	}
@@ -133,11 +139,20 @@ func (s *server) runBriefScheduler(at string) {
 		log.Printf("⏰ 下次每日简报生成时间：%s", next.Format("2006-01-02 15:04"))
 		time.Sleep(time.Until(next))
 
-		ctx, cancel := context.WithTimeout(context.Background(), briefGenTimeout)
-		if _, err := s.generateBrief(ctx); err != nil {
-			log.Printf("⏰ 定时生成简报失败: %v", err) // 失败不中断调度，明天再试
+		// 逐户【串行】生成——1.6GB 小机不能并行跑 N 个推理，API 也有限速；
+		// 07:00 没人急着看第 N 家的简报。副作用恰好是全体用户的每日预热：
+		// reg.get 会把没建的 workspace 建起来，之后白天首访无冷启动。
+		for _, uid := range s.reg.allUIDs() {
+			ctx, cancel := context.WithTimeout(context.Background(), briefGenTimeout)
+			ws, err := s.reg.get(ctx, uid)
+			if err == nil {
+				_, err = generateBrief(ctx, uid, ws)
+			}
+			if err != nil {
+				log.Printf("⏰ [%s] 定时生成简报失败: %v", uid, err) // 单户失败不断链
+			}
+			cancel()
 		}
-		cancel()
 	}
 }
 
