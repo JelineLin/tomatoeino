@@ -80,7 +80,13 @@ func (s *HistoryStore) SetMeal(date, mealField string, m Meal) (replaced bool, e
 		}
 	}
 	if idx >= 0 {
-		replaced = s.days[idx].mealOf(mealField) != nil
+		old := s.days[idx].mealOf(mealField)
+		replaced = old != nil
+		// 结转反馈：record_meal 整餐覆盖时不带 feedback，别把家长已录的反馈抹掉。
+		// 只在新餐没带反馈时结转旧的（未来若支持连反馈一起改，新值优先）。
+		if old != nil && old.Feedback != nil && m.Feedback == nil {
+			m.Feedback = old.Feedback
+		}
 		s.days[idx].setMeal(mealField, &m) // 换指针，不原地改旧 Meal——旧快照仍一致
 	} else {
 		var d Day
@@ -95,6 +101,44 @@ func (s *HistoryStore) SetMeal(date, mealField string, m Meal) (replaced bool, e
 		return replaced, err
 	}
 	return replaced, nil
+}
+
+// SetFeedback 给 date 那天的 mealField 记一条反馈（fb 传 nil 表示清除反馈）。
+// 返回更新后的那一餐，供上层重建向量 doc（Upsert）。
+//
+// 保持 Snapshot 浅拷贝不变量：克隆整餐、在副本上写反馈、再换指针，绝不原地改现有 *Meal
+// ——否则此前拿到快照的读者会被写脏。那一餐不存在时报错（不能给没记录的餐加反馈）。
+func (s *HistoryStore) SetFeedback(date, mealField string, fb *Feedback) (*Meal, error) {
+	if !validMealField(mealField) {
+		return nil, fmt.Errorf("餐别必须是 lunch/fruit/dinner 之一，收到 %q", mealField)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	idx := -1
+	for i := range s.days {
+		if s.days[i].Date == date {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return nil, fmt.Errorf("%s 没有记录，无法加反馈", date)
+	}
+	old := s.days[idx].mealOf(mealField)
+	if old == nil {
+		return nil, fmt.Errorf("%s 的%s没有记录，无法加反馈", date, mealLabelOf(mealField))
+	}
+
+	clone := *old       // 浅拷贝：Dishes 切片共享（只读、不改内容），安全
+	clone.Feedback = fb // 只在副本上写反馈
+	s.days[idx].setMeal(mealField, &clone)
+
+	if err := s.save(); err != nil {
+		return nil, err
+	}
+	return &clone, nil
 }
 
 // save 全量落盘：先留 .bak，再走临时文件 + rename 原子替换。调用方必须已持有锁。

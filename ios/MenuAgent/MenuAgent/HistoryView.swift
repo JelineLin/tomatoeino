@@ -21,6 +21,15 @@ final class HistoryViewModel: ObservableObject {
         }
         isLoading = false
     }
+
+    // submitFeedback 给某一餐记反馈；后端返回更新后的整份历史，直接替换（徽章即时刷新）。
+    func submitFeedback(date: String, field: String, rating: String, note: String) async {
+        do {
+            days = try await api.submitFeedback(date: date, meal: field, rating: rating, note: note).reversed()
+        } catch {
+            errorText = error.localizedDescription
+        }
+    }
 }
 
 struct HistoryView: View {
@@ -55,7 +64,10 @@ struct HistoryView: View {
                 } else {
                     switch mode {
                     case .list: list
-                    case .calendar: CalendarHistoryView(days: vm.days)
+                    case .calendar:
+                        CalendarHistoryView(days: vm.days) { date, field, rating, note in
+                            Task { await vm.submitFeedback(date: date, field: field, rating: rating, note: note) }
+                        }
                     }
                 }
             }
@@ -88,9 +100,15 @@ struct HistoryView: View {
         List(vm.days) { day in
             Section {
                 // 一餐的具体渲染在 MealRowView（CalendarHistoryView.swift），列表和日历共用。
-                MealRowView(label: "午餐", meal: day.lunch)
-                MealRowView(label: "水果", meal: day.fruit)
-                MealRowView(label: "晚餐", meal: day.dinner)
+                MealRowView(label: "午餐", meal: day.lunch, date: day.date, field: "lunch") { r, n in
+                    Task { await vm.submitFeedback(date: day.date, field: "lunch", rating: r, note: n) }
+                }
+                MealRowView(label: "水果", meal: day.fruit, date: day.date, field: "fruit") { r, n in
+                    Task { await vm.submitFeedback(date: day.date, field: "fruit", rating: r, note: n) }
+                }
+                MealRowView(label: "晚餐", meal: day.dinner, date: day.date, field: "dinner") { r, n in
+                    Task { await vm.submitFeedback(date: day.date, field: "dinner", rating: r, note: n) }
+                }
             } header: {
                 HStack(spacing: 6) {
                     Text(day.date)

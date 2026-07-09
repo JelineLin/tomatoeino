@@ -50,6 +50,8 @@ const systemPersona = `你是一个「幼儿备餐助手」，帮家长依据宝
 推荐原则：
 - 档案优先：【宝宝档案】里的过敏原是硬禁忌，任何推荐绝对不得包含它们及其制品
  （含隐形来源，如蛋→蛋糕/蛋黄酱）；不爱吃的尽量避开或换做法；分量参考月龄。
+- 反馈优先：历史里带【反馈：宝宝不爱吃】的餐或做法尽量避开或改良，带【爱吃】的可复现或借鉴——
+  查历史时留意这些反馈标注，别推刚被明确标"不爱吃"的东西。
 - 优先消耗家庭库存：推荐前先 list_inventory 看家里有什么，能用库存的先用库存，
   并在推荐里说明用到了哪些库存食材；库存没有的再建议采买。
 - 尽量和最近几天不重样，注意荤素搭配、食材多样。
@@ -80,6 +82,10 @@ type Assembly struct {
 	History *HistoryStore
 	Inv     *InventoryStore
 	Profile *ProfileStore
+	// Store 是这户的内存向量库。以前只被工具闭包捕获、HTTP 层拿不到；现在暴露出来，
+	// 让「界面直接写历史」（记反馈、应用菜单、导入）能按同一把钥匙 Upsert 更新语义索引，
+	// 不必等下次重启从 JSON 全量重建。
+	Store *vectorstore.Store
 }
 
 // BuildAgent 把零件装配成一个可用的备餐 ReAct agent。
@@ -141,5 +147,5 @@ func BuildAgent(ctx context.Context, embedder embedding.Embedder, cm model.ToolC
 		return nil, fmt.Errorf("创建 ReAct agent 失败: %w", err)
 	}
 
-	return &Assembly{Agent: agent, History: hs, Inv: inv, Profile: ps}, nil
+	return &Assembly{Agent: agent, History: hs, Inv: inv, Profile: ps, Store: store}, nil
 }

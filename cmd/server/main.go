@@ -100,6 +100,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", srv.handleHealth)
 	mux.HandleFunc("/api/history", srv.handleHistory)
+	mux.HandleFunc("/api/history/feedback", srv.handleFeedback)
 	mux.HandleFunc("/api/seasonal", srv.handleSeasonal)
 	mux.HandleFunc("/api/brief", srv.handleBrief)
 	mux.HandleFunc("/api/inventory", srv.handleInventory)
@@ -176,6 +177,64 @@ func (s *server) handleHistory(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	if err := json.NewEncoder(w).Encode(ws.history.Snapshot()); err != nil {
 		log.Printf("/api/history 编码失败: %v", err)
+	}
+}
+
+// feedbackRequest 是前端给某一餐记「儿童食用反馈」的请求体。
+type feedbackRequest struct {
+	Date   string `json:"date"`   // 哪天 YYYY-MM-DD
+	Meal   string `json:"meal"`   // 哪餐 lunch/fruit/dinner
+	Rating string `json:"rating"` // like/dislike/ok；空串=清除这餐的反馈
+	Note   string `json:"note"`   // 备注（可空）
+}
+
+// handleFeedback 给历史里某一餐记反馈（POST 专用）。
+//
+// 写序照 record_meal：① 历史 JSON（权威，SetFeedback）② 向量索引同 ID Upsert（派生，
+// 让 search_meal_history 立刻反映反馈）。这是历史的第二条直写路径（第一条是聊天里的
+// record_meal），共用同一个 ws.history / ws.store，不会两套账。
+func (s *server) handleFeedback(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "只支持 POST", http.StatusMethodNotAllowed)
+		return
+	}
+	ws, err := s.ws(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10) // 反馈是小 JSON，16KB 足够
+	var req feedbackRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "请求体不是合法 JSON："+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	var fb *menu.Feedback
+	if req.Rating != "" {
+		if req.Rating != "like" && req.Rating != "dislike" && req.Rating != "ok" {
+			http.Error(w, "rating 只能是 like/dislike/ok（或空串清除反馈）", http.StatusBadRequest)
+			return
+		}
+		fb = &menu.Feedback{Rating: req.Rating, Note: strings.TrimSpace(req.Note)}
+	}
+
+	// ① 权威视图：历史 JSON + 内存。
+	m, err := ws.history.SetFeedback(req.Date, req.Meal, fb)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	// ② 派生视图：按同一把钥匙（date-mealField）Upsert，让语义检索立刻带上反馈。
+	//    失败不阻断——重启会从 JSON 全量重建自愈（和 record_meal 一个兜底口径）。
+	if err := ws.store.Upsert(r.Context(), []*schema.Document{menu.BuildMealDocument(req.Date, req.Meal, m)}); err != nil {
+		log.Printf("/api/history/feedback 向量更新失败（重启自愈）: %v", err)
+	}
+
+	// 回整份历史，前端直接拿去刷新，省一次 GET。
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if err := json.NewEncoder(w).Encode(ws.history.Snapshot()); err != nil {
+		log.Printf("/api/history/feedback 编码失败: %v", err)
 	}
 }
 

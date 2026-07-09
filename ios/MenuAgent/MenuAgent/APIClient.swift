@@ -35,6 +35,30 @@ struct APIClient {
         return try JSONDecoder().decode([Day].self, from: data)
     }
 
+    // MARK: - 历史反馈
+
+    // submitFeedback 给某一餐记「儿童食用反馈」（POST /api/history/feedback）。
+    // rating 传 like/dislike/ok，空串表示清除该餐反馈。后端写完返回整份历史，直接拿去刷新。
+    func submitFeedback(date: String, meal: String, rating: String, note: String) async throws -> [Day] {
+        struct Body: Encodable {
+            let date: String
+            let meal: String
+            let rating: String
+            let note: String
+        }
+        var req = authorizedRequest(baseURL.appendingPathComponent("api/history/feedback"))
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONEncoder().encode(Body(date: date, meal: meal, rating: rating, note: note))
+        let (data, response) = try await URLSession.shared.data(for: req)
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            let msg = String(data: data, encoding: .utf8).flatMap { $0.isEmpty ? nil : $0 }
+                ?? "HTTP \(http.statusCode)"
+            throw APIError.server(msg)
+        }
+        return try JSONDecoder().decode([Day].self, from: data)
+    }
+
     // MARK: - 时令
 
     // fetchSeasonal 查某个月的应季食材。month 传 nil 表示当前月（由后端定，

@@ -14,10 +14,17 @@ struct Day: Codable, Identifiable {
     var id: String { date }
 }
 
-// Meal 是某一餐：几点吃 + 一组菜。
+// Meal 是某一餐：几点吃 + 一组菜 + 可选的儿童食用反馈。
 struct Meal: Codable {
     let time: String
     let dishes: [Dish]
+    let feedback: Feedback?   // 可选：旧数据/没反馈的餐缺这个字段，正常解码
+}
+
+// Feedback 是家长给某一餐的反馈，对应后端 Meal.feedback。
+struct Feedback: Codable {
+    let rating: String   // like（爱吃）/ dislike（不爱吃）/ ok（一般）
+    let note: String?
 }
 
 // Dish 是一道菜：菜名 + 做法/分量明细。

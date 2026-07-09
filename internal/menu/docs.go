@@ -91,7 +91,25 @@ func renderMeal(date, label string, m *Meal) string {
 		}
 	}
 	b.WriteString(strings.Join(parts, "；"))
+	// 反馈拼在餐后：既进向量 Content（检索时召回带反馈），也进 recent_meals/find_by_ingredient
+	// 的返回文本——三条喂给 agent 的路径统一带上「爱吃/不爱吃」，建议时才真的读得到、权衡得上。
+	if m.Feedback != nil {
+		b.WriteString(renderFeedback(m.Feedback))
+	}
 	return b.String()
+}
+
+// renderFeedback 把一餐的反馈渲染成一句跟在餐后的人话，如「｜反馈：宝宝不爱吃（只吃了几口）」。
+func renderFeedback(fb *Feedback) string {
+	label := map[string]string{"like": "爱吃", "dislike": "不爱吃", "ok": "一般"}[fb.Rating]
+	if label == "" {
+		label = fb.Rating // 未知取值兜底原样输出，不静默吞掉
+	}
+	s := "｜反馈：宝宝" + label
+	if fb.Note != "" {
+		s += "（" + fb.Note + "）"
+	}
+	return s
 }
 
 // BuildMealDocument 把「一餐」变成一条可入库的 Document。
