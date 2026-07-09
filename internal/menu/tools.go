@@ -147,9 +147,21 @@ func NewTools(store *vectorstore.Store, hs *HistoryStore, inv *InventoryStore, p
 		return nil, fmt.Errorf("创建 update_profile 工具失败: %w", err)
 	}
 
+	proposeTool, err := utils.InferTool(
+		"propose_menu",
+		"给出【成套的三餐推荐】时调用它，把你要推荐的 午餐/水果/晚餐 以结构化形式登记一份"+
+			"（家长端据此显示成可逐项编辑、可一键采纳入库的卡片）。登记后【继续照常】写文字版推荐。"+
+			"只在给出具体成套餐次推荐时用（尤其每日简报）；单纯答疑、查历史不调。"+
+			"它只登记不入库——真正入库由家长在前端点「应用」触发，你不要因此去调 record_meal。",
+		makeProposeMenu(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("创建 propose_menu 工具失败: %w", err)
+	}
+
 	return []tool.BaseTool{
 		searchTool, recentTool, ingredientTool, seasonTool, askTool,
-		listInvTool, addInvTool, consumeInvTool, recordTool, profileTool,
+		listInvTool, addInvTool, consumeInvTool, recordTool, profileTool, proposeTool,
 	}, nil
 }
 

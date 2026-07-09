@@ -178,6 +178,36 @@ struct APIClient {
         return try decoder.decode(DailyBrief.self, from: data)
     }
 
+    // applyMeal 采纳（家长编辑后的）推荐的一餐，写进历史（POST /api/history/apply）。
+    // 后端等价于 record_meal，但由家长确认后触发。返回更新后的整份历史。
+    func applyMeal(date: String, meal: String, time: String, dishes: [EditDish]) async throws -> [Day] {
+        struct DishBody: Encodable {
+            let name: String
+            let detail: String
+        }
+        struct Body: Encodable {
+            let date: String
+            let meal: String
+            let time: String
+            let dishes: [DishBody]
+        }
+        let body = Body(
+            date: date, meal: meal, time: time,
+            dishes: dishes.map { DishBody(name: $0.name, detail: $0.detail) }
+        )
+        var req = authorizedRequest(baseURL.appendingPathComponent("api/history/apply"))
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONEncoder().encode(body)
+        let (data, response) = try await URLSession.shared.data(for: req)
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            let msg = String(data: data, encoding: .utf8).flatMap { $0.isEmpty ? nil : $0 }
+                ?? "HTTP \(http.statusCode)"
+            throw APIError.server(msg)
+        }
+        return try JSONDecoder().decode([Day].self, from: data)
+    }
+
     // MARK: - 流式对话
 
     // streamChat 把整段对话历史发给 /api/chat，返回一个事件异步序列。

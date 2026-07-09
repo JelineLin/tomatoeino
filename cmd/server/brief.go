@@ -25,6 +25,8 @@ import (
 	"time"
 
 	"github.com/cloudwego/eino/schema"
+
+	"tomatoeino/internal/menu"
 )
 
 // briefPrompt 是定时任务喂给 agent 的固定指令。
@@ -34,7 +36,9 @@ import (
 const briefPrompt = `请主动为今天生成一份「今日备餐简报」，家长早上会直接查看：
 1. 先查最近几天吃了什么（避免重样），再查当月时令；
 2. 给出今天的 午餐、水果、晚餐 建议，每餐 1~2 道，附关键做法/分量要点；
-3. 结尾用一句话点出今天的搭配思路。
+3. 在写文字之前，先调用一次 propose_menu 把这三餐登记成结构化菜单（家长端要据此
+   显示可编辑、可一键采纳的卡片）——这一步是必须的；
+4. 然后照常写文字版简报，结尾用一句话点出今天的搭配思路。
 注意：这是定时任务，没有人在线回答问题——绝对不要调用 ask_user，直接给出完整简报。`
 
 // briefGenTimeout 单次生成的超时。agent 要跑好几轮工具+模型，给足余量。
@@ -42,9 +46,12 @@ const briefGenTimeout = 3 * time.Minute
 
 // dailyBrief 是一份生成好的简报，/api/brief 原样吐给前端。
 type dailyBrief struct {
-	Date        string    `json:"date"`    // 简报对应的日期，如 2026-07-06
-	Content     string    `json:"content"` // agent 生成的 Markdown 文本
-	GeneratedAt time.Time `json:"generatedAt"`
+	Date    string `json:"date"`    // 简报对应的日期，如 2026-07-06
+	Content string `json:"content"` // agent 生成的 Markdown 文本
+	// Menu 是 agent 经 propose_menu 登记的结构化推荐菜单——前端据此显示可编辑、可一键
+	// 采纳入库的卡片。agent 没调 propose_menu（如降级）时为 nil，前端只显示 Content 文本。
+	Menu        *menu.RecommendedMenu `json:"menu,omitempty"`
+	GeneratedAt time.Time             `json:"generatedAt"`
 }
 
 // briefStore 只存「最近一份」。简报是易腐品——昨天的没有存档价值，
@@ -70,6 +77,9 @@ func (b *briefStore) set(d *dailyBrief) {
 // 定时器和 ?refresh=1 共用这一条路。用 Generate（非流式）：没有客户端在等打字机。
 func generateBrief(ctx context.Context, uid string, ws *workspace) (*dailyBrief, error) {
 	log.Printf("⏰ [%s] 开始生成今日简报…", uid)
+	// 往 ctx 挂一个菜单收集器：agent 若调 propose_menu，结构化菜单会写进 sink，
+	// Generate 返回后读走随简报下发（复用 trace.go 的 ctx 贯穿机制）。
+	ctx, sink := menu.WithMenuSink(ctx)
 	msg, err := ws.agent.Generate(ctx, []*schema.Message{schema.UserMessage(briefPrompt)})
 	if err != nil {
 		return nil, fmt.Errorf("生成简报失败: %w", err)
@@ -77,12 +87,13 @@ func generateBrief(ctx context.Context, uid string, ws *workspace) (*dailyBrief,
 	d := &dailyBrief{
 		Date:    time.Now().Format("2006-01-02"),
 		Content: msg.Content,
+		Menu:    sink.Get(), // agent 没调 propose_menu 则 nil，前端退化为只显示文字
 		// 截断到秒：Go 默认按 RFC3339Nano 序列化（带纳秒小数），
 		// 而 Swift 的 .iso8601 解码策略不认小数秒——去掉小数两边都省事。
 		GeneratedAt: time.Now().Truncate(time.Second),
 	}
 	ws.briefs.set(d)
-	log.Printf("⏰ [%s] 今日简报已生成（%d 字）", uid, len([]rune(d.Content)))
+	log.Printf("⏰ [%s] 今日简报已生成（%d 字，结构化菜单：%v）", uid, len([]rune(d.Content)), d.Menu != nil)
 	return d, nil
 }
 

@@ -101,6 +101,7 @@ func main() {
 	mux.HandleFunc("/healthz", srv.handleHealth)
 	mux.HandleFunc("/api/history", srv.handleHistory)
 	mux.HandleFunc("/api/history/feedback", srv.handleFeedback)
+	mux.HandleFunc("/api/history/apply", srv.handleApplyMeal)
 	mux.HandleFunc("/api/seasonal", srv.handleSeasonal)
 	mux.HandleFunc("/api/brief", srv.handleBrief)
 	mux.HandleFunc("/api/inventory", srv.handleInventory)
@@ -235,6 +236,71 @@ func (s *server) handleFeedback(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	if err := json.NewEncoder(w).Encode(ws.history.Snapshot()); err != nil {
 		log.Printf("/api/history/feedback 编码失败: %v", err)
+	}
+}
+
+// applyMealRequest 是「采纳并保存推荐的某一餐」的请求体——家长在前端编辑推荐后点「应用」。
+type applyMealRequest struct {
+	Date   string           `json:"date"`   // YYYY-MM-DD
+	Meal   string           `json:"meal"`   // lunch/fruit/dinner
+	Time   string           `json:"time"`   // 可空
+	Dishes []applyDishInput `json:"dishes"` // 家长编辑后的菜品
+}
+
+type applyDishInput struct {
+	Name   string `json:"name"`
+	Detail string `json:"detail"`
+}
+
+// handleApplyMeal 把（家长编辑后的）推荐的一餐写进历史（POST 专用）。
+//
+// 等价于聊天里的 record_meal，但由家长在前端确认后触发——propose_menu 只登记不入库，
+// 采纳这一步交给家长点「应用」。写序照 record_meal/feedback：
+// ① 历史 JSON（SetMeal，含结转反馈）② 向量 Upsert（用 SetMeal 返回的 stored 渲染，两视图一致）。
+func (s *server) handleApplyMeal(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "只支持 POST", http.StatusMethodNotAllowed)
+		return
+	}
+	ws, err := s.ws(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	var req applyMealRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "请求体不是合法 JSON："+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	dishes := make([]menu.Dish, 0, len(req.Dishes))
+	for _, d := range req.Dishes {
+		name := strings.TrimSpace(d.Name)
+		if name == "" {
+			continue
+		}
+		dishes = append(dishes, menu.Dish{Name: name, Detail: strings.TrimSpace(d.Detail)})
+	}
+	if len(dishes) == 0 {
+		http.Error(w, "这一餐至少要有一道菜", http.StatusBadRequest)
+		return
+	}
+
+	// SetMeal 会校验餐别（非法返回 error → 400），并结转旧反馈；返回真正落库的那一餐。
+	stored, _, err := ws.history.SetMeal(req.Date, req.Meal, menu.Meal{Time: strings.TrimSpace(req.Time), Dishes: dishes})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := ws.store.Upsert(r.Context(), []*schema.Document{menu.BuildMealDocument(req.Date, req.Meal, stored)}); err != nil {
+		log.Printf("/api/history/apply 向量更新失败（重启自愈）: %v", err)
+	}
+
+	// 回整份历史，前端直接刷新历史 tab。
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if err := json.NewEncoder(w).Encode(ws.history.Snapshot()); err != nil {
+		log.Printf("/api/history/apply 编码失败: %v", err)
 	}
 }
 

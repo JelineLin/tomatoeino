@@ -69,7 +69,34 @@ struct Profile: Codable {
 struct DailyBrief: Codable {
     let date: String        // 简报对应的日期 yyyy-MM-dd
     let content: String
+    let menu: RecommendedMenu?  // agent 经 propose_menu 登记的结构化推荐（可能 nil，只显示文字）
     let generatedAt: Date   // 生成时刻（后端 RFC3339，需 ISO8601 解码策略）
+}
+
+// RecommendedMenu 是 agent 登记的结构化推荐，随简报下发，供「今日推荐」页逐项编辑 + 一键采纳入库。
+struct RecommendedMenu: Codable {
+    let date: String
+    var meals: [ProposedMeal]
+}
+
+// ProposedMeal 是推荐里的一餐。meal（lunch/fruit/dinner）不编辑、当稳定 id；dishes 可编辑。
+struct ProposedMeal: Codable, Identifiable {
+    var meal: String
+    var time: String
+    var dishes: [EditDish]
+    var reason: String
+
+    var id: String { meal }
+}
+
+// EditDish 是可编辑的一道菜。id 用 UUID 供 ForEach 稳定标识（编辑菜名时不错行），
+// 不参与编解码——后端 JSON 只有 name/detail。
+struct EditDish: Codable, Identifiable {
+    let id = UUID()
+    var name: String
+    var detail: String
+
+    enum CodingKeys: String, CodingKey { case name, detail }
 }
 
 // ChatMessage 是聊天界面里的一条消息。text/thinking 设计成 var，
