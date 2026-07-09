@@ -87,6 +87,57 @@ func newOpenAIChatModel(ctx context.Context) (*openai.ChatModel, error) {
 	return cm, nil
 }
 
+// NewVisionChatModel 构造一个「看图说话」的视觉对话模型（图片解析用，见 F1/F2）。
+//
+// 为什么单开一个：chat 用的 DeepSeek 是纯文本，喂不进图片；而图片解析和 embedding 恰好
+// 都在同一个火山方舟（Ark）账号/网关下。所以视觉凭证默认【复用 embedding 那套 Ark】——
+// 优先 vision 专用变量，没配就回退 embedding、再回退 chat：
+//   - OPENAI_VISION_API_KEY  → OPENAI_EMBEDDING_API_KEY → OPENAI_API_KEY
+//   - OPENAI_VISION_BASE_URL → OPENAI_EMBEDDING_BASE_URL → OPENAI_BASE_URL
+//   - OPENAI_VISION_MODEL    默认 doubao-1.5-vision-pro-32k-250115（实测能准确读中文订单截图）
+//
+// 返回 model.BaseChatModel：视觉只做 Generate（图→文字转写），不进 ReAct、不带工具——
+// 这是 Option A，deepseek 的 tool-calling 一点不动，避开换主模型的回归风险。
+func NewVisionChatModel(ctx context.Context) (model.BaseChatModel, error) {
+	apiKey := firstNonEmpty(
+		os.Getenv("OPENAI_VISION_API_KEY"),
+		os.Getenv("OPENAI_EMBEDDING_API_KEY"),
+		os.Getenv("OPENAI_API_KEY"),
+	)
+	if apiKey == "" {
+		return nil, fmt.Errorf("OPENAI_VISION_API_KEY / OPENAI_EMBEDDING_API_KEY / OPENAI_API_KEY 均未设置")
+	}
+	baseURL := firstNonEmpty(
+		os.Getenv("OPENAI_VISION_BASE_URL"),
+		os.Getenv("OPENAI_EMBEDDING_BASE_URL"),
+		os.Getenv("OPENAI_BASE_URL"),
+	)
+	modelName := os.Getenv("OPENAI_VISION_MODEL")
+	if modelName == "" {
+		modelName = "doubao-1.5-vision-pro-32k-250115"
+	}
+
+	cm, err := openai.NewChatModel(ctx, &openai.ChatModelConfig{
+		APIKey:  apiKey,
+		BaseURL: baseURL,
+		Model:   modelName,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("创建视觉模型失败: %w", err)
+	}
+	return cm, nil
+}
+
+// firstNonEmpty 返回第一个非空字符串（多级回退用）。
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 // NewEmbedder 用环境变量构造一个 OpenAI 兼容的 Embedder（把文字变成向量）。
 //
 // 凭证 & 端点：embedding 可以和 chat 完全不在一家——比如 chat 走 DeepSeek、embedding 走

@@ -105,6 +105,27 @@ struct APIClient {
         try await writeInventory(op: "remove", name: name, quantity: 0, unit: "")
     }
 
+    // parseOrderImage 上传订单截图，视觉模型解析成库存条目列表（返回预览，后端不入库）。
+    // 家长在前端确认/编辑后，再逐条走 addInventory 入库。视觉解析慢，超时放宽到 90s。
+    func parseOrderImage(imageBase64: String, mime: String) async throws -> [InventoryItem] {
+        struct Body: Encodable {
+            let image_base64: String
+            let mime: String
+        }
+        var req = authorizedRequest(baseURL.appendingPathComponent("api/inventory/parse-image"))
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONEncoder().encode(Body(image_base64: imageBase64, mime: mime))
+        req.timeoutInterval = 90
+        let (data, response) = try await URLSession.shared.data(for: req)
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            let msg = String(data: data, encoding: .utf8).flatMap { $0.isEmpty ? nil : $0 }
+                ?? "HTTP \(http.statusCode)"
+            throw APIError.server(msg)
+        }
+        return try JSONDecoder().decode([InventoryItem].self, from: data)
+    }
+
     private func writeInventory(op: String, name: String, quantity: Double, unit: String) async throws -> [InventoryItem] {
         struct Body: Encodable {
             let op: String

@@ -31,6 +31,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/flow/agent/react"
 	"github.com/cloudwego/eino/schema"
 
@@ -42,6 +43,9 @@ import (
 // 按 userID 懒加载（见 workspace.go）。handler 里一律先 s.ws(r) 取当前用户的世界。
 type server struct {
 	reg *registry
+	// vision 是进程级共享的视觉模型（图片解析用，图→文字）。它是无状态抽取、跨用户共享，
+	// 不进 per-user workspace。未配置/构建失败时为 nil，图片解析端点会优雅报 503。
+	vision model.BaseChatModel
 }
 
 func main() {
@@ -67,11 +71,18 @@ func main() {
 	if err != nil {
 		log.Fatalf("创建 ToolCallingChatModel 失败: %v", err)
 	}
+	// 视觉模型（图片解析用）。构建失败不致命——没有它只是图片解析端点不可用，
+	// 文字功能照常。默认复用 Ark 凭证（见 llm.NewVisionChatModel）。
+	vision, err := llm.NewVisionChatModel(ctx0)
+	if err != nil {
+		log.Printf("⚠️  视觉模型未就绪（图片解析功能不可用，其余照常）: %v", err)
+		vision = nil
+	}
 
 	// 3. workspace 注册表：数据在 DATA_DIR/users/<uid>/ 下，按需懒构建。
 	//    进程启动不再等全量 embed——毫秒级起服，谁来了建谁的。
 	reg := newRegistry(envOr("DATA_DIR", "data"), users, embedder, cm)
-	srv := &server{reg: reg}
+	srv := &server{reg: reg, vision: vision}
 
 	// 会话清扫：全局 ticker 遍历所有已建 workspace。goroutine 随进程退出。
 	go func() {
@@ -105,6 +116,7 @@ func main() {
 	mux.HandleFunc("/api/seasonal", srv.handleSeasonal)
 	mux.HandleFunc("/api/brief", srv.handleBrief)
 	mux.HandleFunc("/api/inventory", srv.handleInventory)
+	mux.HandleFunc("/api/inventory/parse-image", srv.handleParseOrderImage)
 	mux.HandleFunc("/api/profile", srv.handleProfile)
 	mux.HandleFunc("/api/chat", srv.handleChat)
 
@@ -393,6 +405,51 @@ func (s *server) handleInventory(w http.ResponseWriter, r *http.Request) {
 		}
 	default:
 		http.Error(w, "只支持 GET/POST", http.StatusMethodNotAllowed)
+	}
+}
+
+// parseImageRequest 是上传图片解析的请求体：base64 图片 + MIME 类型。
+type parseImageRequest struct {
+	ImageBase64 string `json:"image_base64"`
+	MIME        string `json:"mime"` // 如 image/jpeg；空则按 jpeg 处理
+}
+
+// handleParseOrderImage 解析「订单截图」为库存条目列表，返回给前端【预览确认】——
+// 本端点【不写库存】。视觉解析不可靠，必须让家长在前端核对/编辑后，再走 add_inventory 入库，
+// 绝不静默改账。解析是无状态抽取，不进 per-user workspace（withAuth 已保证请求合法）。
+func (s *server) handleParseOrderImage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "只支持 POST", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.vision == nil {
+		http.Error(w, "视觉模型未配置，暂不支持图片解析", http.StatusServiceUnavailable)
+		return
+	}
+	// 照片 base64 会到几 MB，放宽到 12MB（iOS 端应先压缩降采样再传）。
+	r.Body = http.MaxBytesReader(w, r.Body, 12<<20)
+	var req parseImageRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "请求体不是合法 JSON："+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.ImageBase64) == "" {
+		http.Error(w, "缺少图片（image_base64 为空）", http.StatusBadRequest)
+		return
+	}
+
+	// 视觉调用可能要几秒到几十秒，单独给个超时。
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+	items, err := menu.ParseOrderImage(ctx, s.vision, req.ImageBase64, req.MIME)
+	if err != nil {
+		http.Error(w, "解析失败："+err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if err := json.NewEncoder(w).Encode(items); err != nil {
+		log.Printf("/api/inventory/parse-image 编码失败: %v", err)
 	}
 }
 
