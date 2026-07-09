@@ -76,6 +76,55 @@ struct APIClient {
         return try JSONDecoder().decode(Season.self, from: data)
     }
 
+    // MARK: - 库存
+
+    // fetchInventory 拉取家庭库存（GET /api/inventory，可选 keyword 子串过滤）。
+    func fetchInventory(keyword: String = "") async throws -> [InventoryItem] {
+        var comps = URLComponents(
+            url: baseURL.appendingPathComponent("api/inventory"),
+            resolvingAgainstBaseURL: false
+        )!
+        if !keyword.isEmpty {
+            comps.queryItems = [URLQueryItem(name: "keyword", value: keyword)]
+        }
+        let (data, response) = try await URLSession.shared.data(for: authorizedRequest(comps.url!))
+        try Self.checkOK(response)
+        return try JSONDecoder().decode([InventoryItem].self, from: data)
+    }
+
+    // 库存写操作：add=累加入库、set=设为精确值、remove=删除整条。后端写完返回整份账本。
+    func addInventory(name: String, quantity: Double, unit: String) async throws -> [InventoryItem] {
+        try await writeInventory(op: "add", name: name, quantity: quantity, unit: unit)
+    }
+
+    func setInventory(name: String, quantity: Double, unit: String) async throws -> [InventoryItem] {
+        try await writeInventory(op: "set", name: name, quantity: quantity, unit: unit)
+    }
+
+    func removeInventory(name: String) async throws -> [InventoryItem] {
+        try await writeInventory(op: "remove", name: name, quantity: 0, unit: "")
+    }
+
+    private func writeInventory(op: String, name: String, quantity: Double, unit: String) async throws -> [InventoryItem] {
+        struct Body: Encodable {
+            let op: String
+            let name: String
+            let quantity: Double
+            let unit: String
+        }
+        var req = authorizedRequest(baseURL.appendingPathComponent("api/inventory"))
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONEncoder().encode(Body(op: op, name: name, quantity: quantity, unit: unit))
+        let (data, response) = try await URLSession.shared.data(for: req)
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            let msg = String(data: data, encoding: .utf8).flatMap { $0.isEmpty ? nil : $0 }
+                ?? "HTTP \(http.statusCode)"
+            throw APIError.server(msg)
+        }
+        return try JSONDecoder().decode([InventoryItem].self, from: data)
+    }
+
     // MARK: - 档案
 
     // fetchProfile 拉取宝宝档案（GET /api/profile）。空档案也会正常返回（字段大多缺省）。

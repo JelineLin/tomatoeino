@@ -44,6 +44,15 @@ struct Season: Codable {
     let source: String?
 }
 
+// InventoryItem 是家庭库存的一条，对应后端 /api/inventory 的 JSON。用 name 作稳定 id。
+struct InventoryItem: Codable, Identifiable {
+    let name: String
+    let quantity: Double
+    let unit: String
+
+    var id: String { name }
+}
+
 // Profile 是宝宝档案，对应后端 /api/profile 的 JSON。字段全可空——空档案也合法。
 // 字段名和后端一致（babyName/birthDate/allergies/dislikes/notes），Codable 不用 CodingKeys。
 // 用 var 是为了「档案」tab 能就地编辑；提交更新时整份 POST 回后端合并落盘。

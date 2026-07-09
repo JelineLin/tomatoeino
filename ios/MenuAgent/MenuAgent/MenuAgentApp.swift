@@ -5,7 +5,9 @@
 //   - 聊天：和 Go 后端的 ReAct agent 对话，回答以 SSE 流式「打字机」呈现。
 //   - 历史：拉取后端 /api/history，浏览宝宝每天的 午餐/水果/晚餐。
 //   - 时令：拉取后端 /api/seasonal，按月查应季蔬菜/水果/水产和备餐提示。
+//   - 库存：拉取/编辑 /api/inventory，手动增删改家庭食材库存。
 //   - 档案：拉取/编辑 /api/profile，改宝宝年龄/过敏源（过敏源在建议时会被排除）。
+// 注：TabView 超过 5 个会自动折叠出「更多」页，库存/档案可能进「更多」——后续可考虑合并入口。
 //
 // 后端默认地址 http://localhost:8080（见 APIClient）。模拟器可直接访问 Mac 本机的 localhost。
 import SwiftUI
@@ -39,6 +41,10 @@ struct RootView: View {
             SeasonalView()
                 .tabItem {
                     Label("时令", systemImage: "leaf")
+                }
+            InventoryView()
+                .tabItem {
+                    Label("库存", systemImage: "shippingbox")
                 }
             ProfileView()
                 .tabItem {

@@ -261,23 +261,64 @@ func (s *server) handleSeasonal(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleInventory 返回家庭库存账本，给前端「库存」界面渲染。
-// 数据和 agent 的 list/add/consume_inventory 工具同一本账（menu.InventoryStore），
-// 聊天里 agent 记的账和这里展示的，永远一个口径。改账走聊天（agent 工具），
-// 这里只读——写入口收敛在一处，避免两条写路径打架。
+// inventoryWrite 是库存写操作的请求体：op 决定动作。
+// 用「POST + op 字段」而不是 PUT/DELETE，是为了不动 withCORS 的允许方法集
+//（现在只放行 GET/POST/OPTIONS），也省掉浏览器预检的麻烦。
+type inventoryWrite struct {
+	Op       string  `json:"op"`       // set（设为精确值/新增）| add（累加入库）| remove（删除整条）
+	Name     string  `json:"name"`     //
+	Quantity float64 `json:"quantity"` // set/add 用；remove 忽略
+	Unit     string  `json:"unit"`     // 可空，沿用已有/默认「份」
+}
+
+// handleInventory 读/写家庭库存账本，给前端「库存」界面用。
+//   - GET ：列出库存（?keyword= 子串过滤）。
+//   - POST：增删改（op=set/add/remove）——界面直接编辑走这里。
+//
+// 和聊天里的 list/add/consume_inventory 工具【同一本账】（同一个 ws.inv、同一把锁）——
+// 界面改和 agent 改不会两套账。库存不入向量库（只有历史 embed），所以写完无需 Upsert。
 func (s *server) handleInventory(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "只支持 GET", http.StatusMethodNotAllowed)
-		return
-	}
 	ws, err := s.ws(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	if err := json.NewEncoder(w).Encode(ws.inv.List(r.URL.Query().Get("keyword"))); err != nil {
-		log.Printf("/api/inventory 编码失败: %v", err)
+
+	switch r.Method {
+	case http.MethodGet:
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		if err := json.NewEncoder(w).Encode(ws.inv.List(r.URL.Query().Get("keyword"))); err != nil {
+			log.Printf("/api/inventory 编码失败: %v", err)
+		}
+	case http.MethodPost:
+		r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+		var req inventoryWrite
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "请求体不是合法 JSON："+err.Error(), http.StatusBadRequest)
+			return
+		}
+		switch req.Op {
+		case "set":
+			_, err = ws.inv.Set(req.Name, req.Quantity, req.Unit)
+		case "add":
+			_, err = ws.inv.Add(req.Name, req.Quantity, req.Unit)
+		case "remove":
+			err = ws.inv.Remove(req.Name)
+		default:
+			http.Error(w, "op 只能是 set/add/remove，收到 "+req.Op, http.StatusBadRequest)
+			return
+		}
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		// 回整份账本，前端直接刷新。
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		if err := json.NewEncoder(w).Encode(ws.inv.List("")); err != nil {
+			log.Printf("/api/inventory 写后编码失败: %v", err)
+		}
+	default:
+		http.Error(w, "只支持 GET/POST", http.StatusMethodNotAllowed)
 	}
 }
 
