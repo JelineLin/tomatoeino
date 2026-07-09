@@ -378,13 +378,14 @@ func makeRecordMeal(hs *HistoryStore, store *vectorstore.Store) func(context.Con
 		m := Meal{Time: strings.TrimSpace(in.Time), Dishes: dishes}
 
 		// ① 权威视图：JSON + 内存。成功即「真相已记」。
-		replaced, err := hs.SetMeal(in.Date, in.Meal, m)
+		stored, replaced, err := hs.SetMeal(in.Date, in.Meal, m)
 		if err != nil {
 			return "入库失败：" + err.Error(), nil
 		}
 
 		// ② 派生视图：向量索引按同一把钥匙（date-mealField）Upsert，旧向量不留尸体。
-		if err := store.Upsert(ctx, []*schema.Document{BuildMealDocument(in.Date, in.Meal, &m)}); err != nil {
+		//    用 stored（含结转反馈）而非本地 m——否则覆盖有反馈的餐时向量会丢反馈。
+		if err := store.Upsert(ctx, []*schema.Document{BuildMealDocument(in.Date, in.Meal, stored)}); err != nil {
 			return fmt.Sprintf("已记入历史，但语义索引更新失败（服务重启后会自愈）：%v", err), nil
 		}
 

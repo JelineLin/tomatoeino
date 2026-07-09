@@ -63,10 +63,14 @@ func (s *HistoryStore) Snapshot() []Day {
 }
 
 // SetMeal 整餐覆盖式写入 date 那天的 mealField（lunch/fruit/dinner）。
-// 返回 replaced：那天那餐原本是否已有记录（true=这次是覆盖修正），供工具措辞用。
-func (s *HistoryStore) SetMeal(date, mealField string, m Meal) (replaced bool, err error) {
+// 返回：
+//   - stored：真正落库的那一餐（含从旧餐结转来的反馈）。调用方必须用它、而不是自己
+//     传进来的 m，去重建向量 doc（BuildMealDocument）——否则覆盖已有反馈的餐时，向量
+//     索引会用不带反馈的 m 渲染，造成「JSON 有反馈、语义检索无反馈」的两视图错位。
+//   - replaced：那天那餐原本是否已有记录（true=这次是覆盖修正），供工具措辞用。
+func (s *HistoryStore) SetMeal(date, mealField string, m Meal) (stored *Meal, replaced bool, err error) {
 	if !validMealField(mealField) {
-		return false, fmt.Errorf("餐别必须是 lunch/fruit/dinner 之一，收到 %q", mealField)
+		return nil, false, fmt.Errorf("餐别必须是 lunch/fruit/dinner 之一，收到 %q", mealField)
 	}
 
 	s.mu.Lock()
@@ -97,10 +101,11 @@ func (s *HistoryStore) SetMeal(date, mealField string, m Meal) (replaced bool, e
 		sort.Slice(s.days, func(i, j int) bool { return s.days[i].Date < s.days[j].Date })
 	}
 
+	// &m 就是刚 setMeal 进去的那份（已含结转反馈），返回它供调用方 Upsert。
 	if err := s.save(); err != nil {
-		return replaced, err
+		return &m, replaced, err
 	}
-	return replaced, nil
+	return &m, replaced, nil
 }
 
 // SetFeedback 给 date 那天的 mealField 记一条反馈（fb 传 nil 表示清除反馈）。

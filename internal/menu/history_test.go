@@ -48,10 +48,10 @@ func TestHistoryStore_SetMealInsertSorted(t *testing.T) {
 
 	meal := Meal{Time: "11:30", Dishes: []Dish{{Name: "番茄鸡蛋面", Detail: "一小碗"}}}
 	// 乱序写入两天，存储必须保持升序（recent_meals 取尾部依赖它）。
-	if replaced, err := hs.SetMeal("2026-07-08", "lunch", meal); err != nil || replaced {
+	if _, replaced, err := hs.SetMeal("2026-07-08", "lunch", meal); err != nil || replaced {
 		t.Fatalf("新写入不该是 replaced，err=%v replaced=%v", err, replaced)
 	}
-	if _, err := hs.SetMeal("2026-07-06", "dinner", meal); err != nil {
+	if _, _, err := hs.SetMeal("2026-07-06", "dinner", meal); err != nil {
 		t.Fatal(err)
 	}
 
@@ -78,12 +78,12 @@ func TestHistoryStore_OverwriteAndBak(t *testing.T) {
 	hs, _ := NewHistoryStore(path)
 
 	old := Meal{Dishes: []Dish{{Name: "番茄鸡蛋面"}}}
-	if _, err := hs.SetMeal("2026-07-08", "lunch", old); err != nil {
+	if _, _, err := hs.SetMeal("2026-07-08", "lunch", old); err != nil {
 		t.Fatal(err)
 	}
 	// 同天同餐再写 = 整餐覆盖，replaced=true。
 	upd := Meal{Dishes: []Dish{{Name: "番茄鸡蛋面"}, {Name: "蒸蛋"}}}
-	replaced, err := hs.SetMeal("2026-07-08", "lunch", upd)
+	_, replaced, err := hs.SetMeal("2026-07-08", "lunch", upd)
 	if err != nil || !replaced {
 		t.Fatalf("覆盖写应 replaced=true，err=%v replaced=%v", err, replaced)
 	}
@@ -101,15 +101,44 @@ func TestHistoryStore_OverwriteAndBak(t *testing.T) {
 	}
 
 	// 同天另一餐不受影响、不算覆盖。
-	if replaced, _ := hs.SetMeal("2026-07-08", "dinner", old); replaced {
+	if _, replaced, _ := hs.SetMeal("2026-07-08", "dinner", old); replaced {
 		t.Error("同天不同餐是新写入，不该 replaced")
 	}
 }
 
 func TestHistoryStore_InvalidMealField(t *testing.T) {
 	hs, _ := NewHistoryStore(filepath.Join(t.TempDir(), "h.json"))
-	if _, err := hs.SetMeal("2026-07-08", "宵夜", Meal{Dishes: []Dish{{Name: "x"}}}); err == nil {
+	if _, _, err := hs.SetMeal("2026-07-08", "宵夜", Meal{Dishes: []Dish{{Name: "x"}}}); err == nil {
 		t.Error("非法餐别应报错")
+	}
+}
+
+// 反馈结转回归：先记反馈、再 record_meal 覆盖同餐（不带反馈），旧反馈必须结转，
+// 且 SetMeal 返回的 stored 要带上它——调用方拿 stored 重建的向量 doc 才不会丢反馈
+//（否则就是审查抓到的「JSON 有反馈、语义检索无反馈」两视图错位）。
+func TestHistoryStore_FeedbackCarryOverOnReRecord(t *testing.T) {
+	hs, _ := NewHistoryStore(filepath.Join(t.TempDir(), "h.json"))
+	if _, _, err := hs.SetMeal("2026-07-08", "lunch", Meal{Dishes: []Dish{{Name: "面"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hs.SetFeedback("2026-07-08", "lunch", &Feedback{Rating: "dislike", Note: "只吃几口"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 再记同餐、不带反馈。
+	stored, replaced, err := hs.SetMeal("2026-07-08", "lunch", Meal{Dishes: []Dish{{Name: "面"}, {Name: "蒸蛋"}}})
+	if err != nil || !replaced {
+		t.Fatalf("覆盖写应 replaced=true，err=%v replaced=%v", err, replaced)
+	}
+	if stored.Feedback == nil || stored.Feedback.Rating != "dislike" {
+		t.Fatalf("stored 应结转旧反馈 dislike，实际 %+v", stored.Feedback)
+	}
+	if fb := hs.Snapshot()[0].Lunch.Feedback; fb == nil || fb.Rating != "dislike" {
+		t.Errorf("JSON 侧反馈应保留，实际 %+v", fb)
+	}
+	// 关键：用 stored 渲染的向量 doc 必须含反馈文本，才与 JSON 同步。
+	if doc := BuildMealDocument("2026-07-08", "lunch", stored); !strings.Contains(doc.Content, "不爱吃") {
+		t.Errorf("向量 doc 应含结转的反馈文本，实际: %s", doc.Content)
 	}
 }
 
