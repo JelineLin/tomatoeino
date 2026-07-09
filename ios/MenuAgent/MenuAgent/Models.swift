@@ -33,6 +33,19 @@ struct Season: Codable {
     let fruit: [String]
     let aquatic: [String]
     let tip: String
+    // 数据来源说明。设为可选：旧后端不返回该字段时，整个时令 tab 不会因缺字段解码失败。
+    let source: String?
+}
+
+// Profile 是宝宝档案，对应后端 /api/profile 的 JSON。字段全可空——空档案也合法。
+// 字段名和后端一致（babyName/birthDate/allergies/dislikes/notes），Codable 不用 CodingKeys。
+// 用 var 是为了「档案」tab 能就地编辑；提交更新时整份 POST 回后端合并落盘。
+struct Profile: Codable {
+    var babyName: String?
+    var birthDate: String?     // 出生日期 "YYYY-MM-DD"（后端只存生日，月龄按当天现算）
+    var allergies: [String]?   // 过敏原（硬禁忌，建议时绝对排除）
+    var dislikes: [String]?    // 不吃/不爱吃（软偏好）
+    var notes: String?         // 其他要点
 }
 
 // DailyBrief 是后端定时生成的「今日备餐简报」，对应 /api/brief 的 JSON。

@@ -1,10 +1,11 @@
 // MenuAgent —— 「幼儿备餐助手」iOS 前端入口。
 //
-// 四个 tab：
+// 五个 tab：
 //   - 今日：展示后端定时生成的「今日备餐简报」（agent 主动产出，打开即看）。
 //   - 聊天：和 Go 后端的 ReAct agent 对话，回答以 SSE 流式「打字机」呈现。
 //   - 历史：拉取后端 /api/history，浏览宝宝每天的 午餐/水果/晚餐。
 //   - 时令：拉取后端 /api/seasonal，按月查应季蔬菜/水果/水产和备餐提示。
+//   - 档案：拉取/编辑 /api/profile，改宝宝年龄/过敏源（过敏源在建议时会被排除）。
 //
 // 后端默认地址 http://localhost:8080（见 APIClient）。模拟器可直接访问 Mac 本机的 localhost。
 import SwiftUI
@@ -38,6 +39,10 @@ struct RootView: View {
             SeasonalView()
                 .tabItem {
                     Label("时令", systemImage: "leaf")
+                }
+            ProfileView()
+                .tabItem {
+                    Label("档案", systemImage: "person.crop.circle")
                 }
         }
         // 全局主色：暖橙——备餐 app 的「食欲色」，tab/按钮/选中态一起生效。

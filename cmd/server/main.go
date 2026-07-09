@@ -222,21 +222,46 @@ func (s *server) handleInventory(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleProfile 返回宝宝档案，给前端展示/确认用。
-// 和其它账本一样：写入口收敛在聊天（update_profile 工具），这里只读。
+// handleProfile 读/写宝宝档案，给前端「档案」tab 用。
+//   - GET ：返回当前档案（展示 + 编辑回填）。
+//   - POST：合并式更新档案（界面上改年龄/过敏源等）。
+//
+// 写路径和聊天里的 update_profile 工具【共用同一个 ProfileStore.Update 写核心】——
+// 同一套合并/校验/落盘语义、同一把锁，界面直接改和 agent 改不会两套账。
+// （这有意打破了早先「写只走聊天」的洁癖：直接编辑类 UI 不可能绕聊天走，
+// 代价是历史/档案从此有两条写入路径，但都收敛到同一个 store，安全。）
 func (s *server) handleProfile(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "只支持 GET", http.StatusMethodNotAllowed)
-		return
-	}
 	ws, err := s.ws(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	if err := json.NewEncoder(w).Encode(ws.profile.Get()); err != nil {
-		log.Printf("/api/profile 编码失败: %v", err)
+	switch r.Method {
+	case http.MethodGet:
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		if err := json.NewEncoder(w).Encode(ws.profile.Get()); err != nil {
+			log.Printf("/api/profile 编码失败: %v", err)
+		}
+	case http.MethodPost:
+		// 档案是小 JSON，64KB 足够；挡掉异常大包。
+		r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+		var patch menu.Profile
+		if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+			http.Error(w, "请求体不是合法档案 JSON："+err.Error(), http.StatusBadRequest)
+			return
+		}
+		// 合并语义：空字符串字段保持原值，非 nil 数组整组替换（传空数组即清空）。
+		p, err := ws.profile.Update(patch)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		if err := json.NewEncoder(w).Encode(p); err != nil {
+			log.Printf("/api/profile 写后编码失败: %v", err)
+		}
+	default:
+		http.Error(w, "只支持 GET/POST", http.StatusMethodNotAllowed)
 	}
 }
 

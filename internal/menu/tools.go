@@ -414,40 +414,17 @@ func makeUpdateProfile(ps *ProfileStore) func(context.Context, profileInput) (st
 		toolLog(ctx, "update_profile(name=%q birth=%q allergies=%d dislikes=%d)",
 			in.BabyName, in.BirthDate, len(in.Allergies), len(in.Dislikes))
 
-		// 空调用在输入层就拒绝——不能因为档案本来有内容就把无操作当成功。
-		if in.BabyName == "" && in.BirthDate == "" && in.Allergies == nil &&
-			in.Dislikes == nil && in.Notes == "" {
-			return "建档失败：至少要提供一项要更新的信息。", nil
-		}
-
-		if in.BirthDate != "" {
-			t, err := time.Parse("2006-01-02", in.BirthDate)
-			if err != nil {
-				return fmt.Sprintf("建档失败：出生日期 %q 不是 YYYY-MM-DD 格式。", in.BirthDate), nil
-			}
-			if t.After(time.Now()) {
-				return fmt.Sprintf("建档失败：出生日期 %s 在未来，请确认后重试。", in.BirthDate), nil
-			}
-		}
-
-		p := ps.Get()
-		if in.BabyName != "" {
-			p.BabyName = strings.TrimSpace(in.BabyName)
-		}
-		if in.BirthDate != "" {
-			p.BirthDate = in.BirthDate
-		}
-		if in.Allergies != nil {
-			p.Allergies = trimAll(in.Allergies)
-		}
-		if in.Dislikes != nil {
-			p.Dislikes = trimAll(in.Dislikes)
-		}
-		if in.Notes != "" {
-			p.Notes = strings.TrimSpace(in.Notes)
-		}
-		if err := ps.Set(p); err != nil {
-			return "建档失败：" + err.Error(), nil
+		// 合并/校验/落盘的写核心收敛在 ProfileStore.Update，和 HTTP 写端点同源。
+		// 工具只负责把裸错误包成给模型自纠的人话。
+		p, err := ps.Update(Profile{
+			BabyName:  in.BabyName,
+			BirthDate: in.BirthDate,
+			Allergies: in.Allergies,
+			Dislikes:  in.Dislikes,
+			Notes:     in.Notes,
+		})
+		if err != nil {
+			return "建档失败：" + err.Error() + "。", nil
 		}
 		return "已更新宝宝档案。" + renderProfile(p, time.Now()), nil
 	}

@@ -18,6 +18,7 @@
 		1A1100000000000000000029 /* BriefView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A1100000000000000000028 /* BriefView.swift */; };
 		1A110000000000000000002B /* Secrets.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A110000000000000000002A /* Secrets.swift */; };
 		1A110000000000000000002D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 1A110000000000000000002C /* Assets.xcassets */; };
+		1A110000000000000000002E /* ProfileView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A110000000000000000002F /* ProfileView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -34,6 +35,7 @@
 		1A1100000000000000000028 /* BriefView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BriefView.swift; sourceTree = "<group>"; };
 		1A110000000000000000002A /* Secrets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Secrets.swift; sourceTree = "<group>"; };
 		1A110000000000000000002C /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		1A110000000000000000002F /* ProfileView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -67,6 +69,7 @@
 				1A1100000000000000000017 /* MarkdownTextView.swift */,
 				1A1100000000000000000018 /* SeasonalView.swift */,
 				1A1100000000000000000028 /* BriefView.swift */,
+				1A110000000000000000002F /* ProfileView.swift */,
 				1A110000000000000000002A /* Secrets.swift */,
 				1A1100000000000000000015 /* Info.plist */,
 				1A110000000000000000002C /* Assets.xcassets */,
@@ -161,6 +164,7 @@
 				1A110000000000000000002B /* Secrets.swift in Sources */,
 				1A1100000000000000000026 /* MarkdownTextView.swift in Sources */,
 				1A1100000000000000000027 /* SeasonalView.swift in Sources */,
+				1A110000000000000000002E /* ProfileView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

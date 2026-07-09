@@ -68,6 +68,9 @@ struct SeasonalView: View {
                 categoryCard(title: "应季水果", icon: "🍎", items: season.fruit, color: .pink)
                 categoryCard(title: "应季水产", icon: "🐟", items: season.aquatic, color: .blue)
                 tipCard(season.tip)
+                if let source = season.source, !source.isEmpty {
+                    sourceCard(source)
+                }
             }
             .padding()
         }
@@ -167,6 +170,27 @@ struct SeasonalView: View {
         .padding()
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.yellow.opacity(0.12))
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    // 数据来源卡：弱化处理（小图标 + 次要色小字），如实交代这批时令是哪来的，
+    // 别抢主内容。文案由后端 season.source 给，前端只负责老实展示。
+    private func sourceCard(_ source: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "info.circle")
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("数据来源")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Text(source)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding()
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(.tertiarySystemBackground))
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 }

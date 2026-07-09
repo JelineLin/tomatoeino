@@ -52,6 +52,33 @@ struct APIClient {
         return try JSONDecoder().decode(Season.self, from: data)
     }
 
+    // MARK: - 档案
+
+    // fetchProfile 拉取宝宝档案（GET /api/profile）。空档案也会正常返回（字段大多缺省）。
+    func fetchProfile() async throws -> Profile {
+        let url = baseURL.appendingPathComponent("api/profile")
+        let (data, response) = try await URLSession.shared.data(for: authorizedRequest(url))
+        try Self.checkOK(response)
+        return try JSONDecoder().decode(Profile.self, from: data)
+    }
+
+    // updateProfile 提交档案更新（POST /api/profile）。后端做合并/校验/落盘，返回更新后的档案。
+    // 合并语义：空字符串字段保持原值，非 nil 数组整组替换（传空数组即清空）。
+    // 出错（如生日格式/未来）时后端会给中文说明，这里原样抛出给界面展示。
+    func updateProfile(_ profile: Profile) async throws -> Profile {
+        var req = authorizedRequest(baseURL.appendingPathComponent("api/profile"))
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONEncoder().encode(profile)
+        let (data, response) = try await URLSession.shared.data(for: req)
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            let msg = String(data: data, encoding: .utf8).flatMap { $0.isEmpty ? nil : $0 }
+                ?? "HTTP \(http.statusCode)"
+            throw APIError.server(msg)
+        }
+        return try JSONDecoder().decode(Profile.self, from: data)
+    }
+
     // MARK: - 今日简报
 
     // fetchBrief 拉取后端定时生成的「今日备餐简报」。
