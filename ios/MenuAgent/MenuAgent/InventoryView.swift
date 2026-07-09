@@ -24,23 +24,36 @@ final class InventoryViewModel: ObservableObject {
         parsing = true
         parseError = nil
         defer { parsing = false }
-        guard let (jpeg, mime) = compressForUpload(imageData) else {
+        // 压缩 + base64 是 CPU 密集（大图解码/降采样/编码），挪出主线程避免卡 UI。
+        let payload = await Task.detached(priority: .userInitiated) {
+            compressForUpload(imageData).map { ($0.0.base64EncodedString(), $0.1) }
+        }.value
+        guard let (b64, mime) = payload else {
             parseError = "图片处理失败"
             return nil
         }
         do {
-            return try await api.parseOrderImage(imageBase64: jpeg.base64EncodedString(), mime: mime)
+            return try await api.parseOrderImage(imageBase64: b64, mime: mime)
         } catch {
             parseError = error.localizedDescription
             return nil
         }
     }
 
-    // addAll 把确认后的多条依次入库（每条走 add，累加语义）。
+    // addAll 把确认后的多条依次入库，并【累计失败项】——否则中途某条失败会被后续成功
+    // 把 errorText 冲掉，家长根本不知道有条目没进去（审查抓到的静默丢失）。
     func addAll(_ items: [EditableInvItem]) async {
+        var failed: [String] = []
         for it in items {
-            await add(name: it.name, quantity: it.quantity, unit: it.unit)
+            do {
+                self.items = try await api.addInventory(name: it.name, quantity: it.quantity, unit: it.unit)
+            } catch {
+                failed.append(it.name)
+            }
         }
+        errorText = failed.isEmpty
+            ? nil
+            : "有 \(failed.count) 项没入库：\(failed.joined(separator: "、"))，可手动再加"
     }
 
     func load() async {
@@ -257,6 +270,7 @@ private func compressForUpload(_ data: Data, maxDimension: CGFloat = 1600, quali
     let size = CGSize(width: img.size.width * scale, height: img.size.height * scale)
     let format = UIGraphicsImageRendererFormat.default()
     format.opaque = true
+    format.scale = 1 // 必须！否则按屏幕 @2x/@3x 渲染，实际像素是 size 的 2~3 倍，压不下来
     let resized = UIGraphicsImageRenderer(size: size, format: format).image { _ in
         img.draw(in: CGRect(origin: .zero, size: size))
     }
