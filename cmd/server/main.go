@@ -274,6 +274,14 @@ func (s *server) handleApplyMeal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 日期必须是具体 YYYY-MM-DD——和 record_meal/propose_menu 一样把关，
+	// 非 ISO 串会污染历史的字符串升序、把 recent_meals 的「最近」搞乱。
+	date := strings.TrimSpace(req.Date)
+	if _, err := time.Parse("2006-01-02", date); err != nil {
+		http.Error(w, "日期不是 YYYY-MM-DD 格式", http.StatusBadRequest)
+		return
+	}
+
 	dishes := make([]menu.Dish, 0, len(req.Dishes))
 	for _, d := range req.Dishes {
 		name := strings.TrimSpace(d.Name)
@@ -288,12 +296,12 @@ func (s *server) handleApplyMeal(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// SetMeal 会校验餐别（非法返回 error → 400），并结转旧反馈；返回真正落库的那一餐。
-	stored, _, err := ws.history.SetMeal(req.Date, req.Meal, menu.Meal{Time: strings.TrimSpace(req.Time), Dishes: dishes})
+	stored, _, err := ws.history.SetMeal(date, req.Meal, menu.Meal{Time: strings.TrimSpace(req.Time), Dishes: dishes})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := ws.store.Upsert(r.Context(), []*schema.Document{menu.BuildMealDocument(req.Date, req.Meal, stored)}); err != nil {
+	if err := ws.store.Upsert(r.Context(), []*schema.Document{menu.BuildMealDocument(date, req.Meal, stored)}); err != nil {
 		log.Printf("/api/history/apply 向量更新失败（重启自愈）: %v", err)
 	}
 

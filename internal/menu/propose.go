@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 )
 
 // RecommendedMenu 是一次推荐的结构化结果：某天的若干餐。随简报下发给 iOS，
@@ -91,10 +92,22 @@ func makeProposeMenu() func(context.Context, proposeMenuInput) (string, error) {
 	return func(ctx context.Context, in proposeMenuInput) (string, error) {
 		toolLog(ctx, "propose_menu(date=%s meals=%d)", in.Date, len(in.Meals))
 
-		rm := &RecommendedMenu{Date: strings.TrimSpace(in.Date)}
+		// 日期必须是具体的 YYYY-MM-DD——和 record_meal 一样把关。否则「今天」「2026/07/09」这类
+		// 会污染历史：HistoryStore 按字符串升序存、recent_meals 取尾部当「最近」，非 ISO 串会
+		// 排到最后被永久当成最新的一天。返回人话错误让模型自己换算重试。
+		date := strings.TrimSpace(in.Date)
+		if _, err := time.Parse("2006-01-02", date); err != nil {
+			return fmt.Sprintf("propose_menu 失败：日期 %q 不是 YYYY-MM-DD 格式，请按今天的日期换算成具体日期再登记。", in.Date), nil
+		}
+
+		rm := &RecommendedMenu{Date: date}
+		seen := map[string]bool{} // 同一餐别只登记一次——前端按餐别唯一渲染/采纳，重复会串卡片
 		for _, pm := range in.Meals {
 			if !validMealField(pm.Meal) {
 				return fmt.Sprintf("propose_menu 失败：餐别 %q 无效，只能是 lunch/fruit/dinner。", pm.Meal), nil
+			}
+			if seen[pm.Meal] {
+				continue
 			}
 			dishes := make([]Dish, 0, len(pm.Dishes))
 			for _, d := range pm.Dishes {
@@ -107,6 +120,7 @@ func makeProposeMenu() func(context.Context, proposeMenuInput) (string, error) {
 			if len(dishes) == 0 {
 				continue
 			}
+			seen[pm.Meal] = true
 			rm.Meals = append(rm.Meals, ProposedMeal{
 				Meal:   pm.Meal,
 				Time:   strings.TrimSpace(pm.Time),
@@ -118,10 +132,13 @@ func makeProposeMenu() func(context.Context, proposeMenuInput) (string, error) {
 			return "propose_menu 失败：没有有效的餐或菜品，请带上具体餐别和至少一道菜。", nil
 		}
 
-		if sink := menuSinkFrom(ctx); sink != nil {
-			sink.set(rm)
+		// 没有收集器（如聊天流程没挂 sink）——结构化卡片这条路暂不支持，别让模型
+		// 对家长承诺「有可编辑卡片」；让它照常用文字把这份推荐完整写出来。
+		sink := menuSinkFrom(ctx)
+		if sink == nil {
+			return "（本轮无法登记为可编辑卡片，请照常用文字把这份推荐完整写给家长。）", nil
 		}
-		// 返回给模型：结构化已登记，让它继续照常写文字简报。
+		sink.set(rm)
 		return fmt.Sprintf("已登记结构化菜单（%d 餐，家长端会显示为可编辑卡片）。现在请继续照常输出面向家长的文字简报。", len(rm.Meals)), nil
 	}
 }
