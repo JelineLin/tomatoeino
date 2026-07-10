@@ -88,6 +88,9 @@ func parseHistoryJSON(raw string) ([]Day, error) {
 		}
 		days = append(days, d)
 	}
+	// 合并同日期的多条（模型偶尔把一天拆成两条）——预览里每个日期只出现一次，
+	// Day.id=date 不重复，前端 ForEach/左滑删不会错位。
+	days = mergeDaysByDate(days)
 	if len(days) == 0 {
 		return nil, fmt.Errorf("没解析出有效的历史记录（日期需 YYYY-MM-DD、每餐至少一道菜）。模型输出：%s", truncate(body, 200))
 	}

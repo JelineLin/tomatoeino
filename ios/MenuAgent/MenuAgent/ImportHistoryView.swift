@@ -153,9 +153,13 @@ struct ImportHistoryView: View {
     }
 
     private func handlePhoto(_ item: PhotosPickerItem?) async {
-        guard let item, let data = try? await item.loadTransferable(type: Data.self) else { return }
+        guard let item else { return }
+        defer { vm.photoItem = nil } // 始终重置：否则同一张读失败后再选它，onChange 不触发、卡死
+        guard let data = try? await item.loadTransferable(type: Data.self) else {
+            vm.errorText = "读取图片失败，换一张试试"
+            return
+        }
         await vm.parseImage(data)
-        vm.photoItem = nil
     }
 
     // MARK: - 预览确认

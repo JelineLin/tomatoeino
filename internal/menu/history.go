@@ -122,10 +122,39 @@ type WrittenMeal struct {
 	Meal  *Meal
 }
 
+// mergeDaysByDate 合并同一日期的多条记录（后出现的餐覆盖先出现的），保证每个日期只出现一次。
+// 解析和导入都先过它：否则同批出现两条相同 date+meal 时，added/replaced 会算错（第一条算新增、
+// 第二条发现「刚被第一条插进去的那天」→ 误记成覆盖），还会为同一个 doc ID 白 embed 一次。
+func mergeDaysByDate(in []Day) []Day {
+	out := make([]Day, 0, len(in))
+	idx := map[string]int{}
+	for _, d := range in {
+		i, ok := idx[d.Date]
+		if !ok {
+			idx[d.Date] = len(out)
+			out = append(out, d)
+			continue
+		}
+		if d.Lunch != nil {
+			out[i].Lunch = d.Lunch
+		}
+		if d.Fruit != nil {
+			out[i].Fruit = d.Fruit
+		}
+		if d.Dinner != nil {
+			out[i].Dinner = d.Dinner
+		}
+	}
+	return out
+}
+
 // ImportDays 批量导入多天多餐（F1 导入历史用）：一把锁内合并、【一次落盘】
 //（比逐餐 SetMeal 少 N 次文件写）。同天同餐覆盖并结转旧反馈；非法日期、无菜的餐自动跳过，
 // 不污染历史的字符串升序。返回真正写入的餐（供 Upsert）+ 新增/覆盖计数。
 func (s *HistoryStore) ImportDays(days []Day) (written []WrittenMeal, added, replaced int, err error) {
+	// 先按日期合并：保证每个 (date,field) 只处理一次，added/replaced 才准、也不重复 embed。
+	days = mergeDaysByDate(days)
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

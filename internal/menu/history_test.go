@@ -198,3 +198,42 @@ func TestRecordMeal(t *testing.T) {
 		}
 	}
 }
+
+// 同批含重复日期时，ImportDays 必须合并、计数正确（审查抓到的：会误报 replaced + 白 embed）。
+func TestImportDays_MergesDuplicateDates(t *testing.T) {
+	hs, _ := NewHistoryStore(filepath.Join(t.TempDir(), "h.json"))
+	// 同一天拆成两条（一条午餐、一条晚餐）+ 另一天。
+	days := []Day{
+		{Date: "2026-07-08", Lunch: &Meal{Dishes: []Dish{{Name: "面"}}}},
+		{Date: "2026-07-08", Dinner: &Meal{Dishes: []Dish{{Name: "鱼"}}}},
+		{Date: "2026-07-09", Lunch: &Meal{Dishes: []Dish{{Name: "粥"}}}},
+	}
+	written, added, replaced, err := hs.ImportDays(days)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 3 个不同的 (date,field)：全是新增，无覆盖，无重复 doc。
+	if added != 3 || replaced != 0 {
+		t.Errorf("应 added=3 replaced=0，实际 added=%d replaced=%d", added, replaced)
+	}
+	if len(written) != 3 {
+		t.Errorf("应写 3 餐（无重复 doc），实际 %d", len(written))
+	}
+	// 07-08 那天应同时有午餐和晚餐（合并成功）。
+	snap := hs.Snapshot()
+	var d8 *Day
+	for i := range snap {
+		if snap[i].Date == "2026-07-08" {
+			d8 = &snap[i]
+		}
+	}
+	if d8 == nil || d8.Lunch == nil || d8.Dinner == nil {
+		t.Errorf("07-08 应合并出午餐+晚餐，实际 %+v", d8)
+	}
+
+	// 再导入已存在的 07-09 午餐 → 这次才是覆盖。
+	_, added2, replaced2, _ := hs.ImportDays([]Day{{Date: "2026-07-09", Lunch: &Meal{Dishes: []Dish{{Name: "改成软饭"}}}}})
+	if added2 != 0 || replaced2 != 1 {
+		t.Errorf("覆盖已有应 added=0 replaced=1，实际 added=%d replaced=%d", added2, replaced2)
+	}
+}
