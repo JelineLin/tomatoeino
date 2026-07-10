@@ -21,3 +21,6 @@ ios/**/*.xcuserstate
 
 # macOS
 .DS_Store
+
+# make linux/release 的产物（二进制不进仓库，发包走 GitHub Release）
+dist/

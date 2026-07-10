@@ -32,7 +32,9 @@ go test -v -run RealEmbedding ./internal/vectorstore/   # the one test that hits
 
 Most tests use a hand-rolled `fakeEmbedder` (word-count vectors) so they run offline and free. The `RealEmbedding` test actually calls the OpenAI embedding API and **self-skips when `OPENAI_API_KEY` is unset** — so a bare `go test ./...` is always safe and offline.
 
-There is no Makefile. In VS Code, use the "Debug 01_chatmodel" or "Debug current package" launch configs (`.vscode/launch.json`) — both pin `cwd` to the repo root and inject `.env`.
+A Makefile covers the routine flows: `make build` / `make test` / `make linux` (cross-compile the server for hermas into `dist/`, gitignored), `make release VERSION=vX.Y.Z` (tag + upload the linux binary to GitHub Releases via `gh` — binaries are never committed to the repo), `make deploy` (scp to hermas via temp path + `sudo mv` — direct overwrite of a running binary hits "text file busy" — then restart + healthz check).
+
+In VS Code, use the "Debug 01_chatmodel" or "Debug current package" launch configs (`.vscode/launch.json`) — both pin `cwd` to the repo root and inject `.env`.
 
 ## Architecture
 
