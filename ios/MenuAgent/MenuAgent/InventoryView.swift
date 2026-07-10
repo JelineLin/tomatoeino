@@ -261,9 +261,10 @@ struct ParsedOrder: Identifiable {
     var items: [EditableInvItem]
 }
 
-// compressForUpload 把相册原图降采样 + JPEG 压缩再上传：订单截图通常几 MB，
+// compressForUpload 把相册原图降采样 + JPEG 压缩再上传：截图通常几 MB，
 // 压到最长边 1600px、质量 0.7，既够视觉模型看清文字，又不撑爆明文 HTTP 上传。
-private func compressForUpload(_ data: Data, maxDimension: CGFloat = 1600, quality: CGFloat = 0.7) -> (Data, String)? {
+// 订单截图（本文件）和导入历史（ImportHistoryView）共用，故为 internal。
+func compressForUpload(_ data: Data, maxDimension: CGFloat = 1600, quality: CGFloat = 0.7) -> (Data, String)? {
     guard let img = UIImage(data: data) else { return nil }
     let longest = max(img.size.width, img.size.height)
     let scale = longest > maxDimension ? maxDimension / longest : 1

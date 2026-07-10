@@ -76,6 +76,41 @@ struct APIClient {
         return try JSONDecoder().decode(Season.self, from: data)
     }
 
+    // MARK: - 导入历史
+
+    // parseHistoryText 把粘贴的文字解析成结构化历史（预览，后端不写库）。视觉/文本解析慢，超时放宽。
+    func parseHistoryText(text: String) async throws -> [Day] {
+        struct Body: Encodable { let text: String }
+        return try await postJSON("api/history/parse", Body(text: text), timeout: 90)
+    }
+
+    // parseHistoryImage 把菜单/记录截图解析成结构化历史（预览，后端不写库）。
+    func parseHistoryImage(imageBase64: String, mime: String) async throws -> [Day] {
+        struct Body: Encodable { let image_base64: String; let mime: String }
+        return try await postJSON("api/history/parse", Body(image_base64: imageBase64, mime: mime), timeout: 90)
+    }
+
+    // importHistory 把家长确认后的历史批量写入（后端 ImportDays 一次落盘）。
+    func importHistory(_ days: [Day]) async throws -> ImportResult {
+        return try await postJSON("api/history/import", days, timeout: 60)
+    }
+
+    // postJSON 是「POST JSON body、拿 JSON 回来、非2xx 抛后端中文错误」的统一小工具。
+    private func postJSON<T: Encodable, R: Decodable>(_ path: String, _ body: T, timeout: TimeInterval = 30) async throws -> R {
+        var req = authorizedRequest(baseURL.appendingPathComponent(path))
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONEncoder().encode(body)
+        req.timeoutInterval = timeout
+        let (data, response) = try await URLSession.shared.data(for: req)
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            let msg = String(data: data, encoding: .utf8).flatMap { $0.isEmpty ? nil : $0 }
+                ?? "HTTP \(http.statusCode)"
+            throw APIError.server(msg)
+        }
+        return try JSONDecoder().decode(R.self, from: data)
+    }
+
     // MARK: - 库存
 
     // fetchInventory 拉取家庭库存（GET /api/inventory，可选 keyword 子串过滤）。

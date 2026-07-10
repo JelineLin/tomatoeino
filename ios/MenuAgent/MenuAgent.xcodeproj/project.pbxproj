@@ -20,6 +20,7 @@
 		1A110000000000000000002D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 1A110000000000000000002C /* Assets.xcassets */; };
 		1A110000000000000000002E /* ProfileView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A110000000000000000002F /* ProfileView.swift */; };
 		1A1100000000000000000030 /* InventoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A1100000000000000000031 /* InventoryView.swift */; };
+		1A1100000000000000000032 /* ImportHistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A1100000000000000000033 /* ImportHistoryView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -38,6 +39,7 @@
 		1A110000000000000000002C /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		1A110000000000000000002F /* ProfileView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileView.swift; sourceTree = "<group>"; };
 		1A1100000000000000000031 /* InventoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InventoryView.swift; sourceTree = "<group>"; };
+		1A1100000000000000000033 /* ImportHistoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImportHistoryView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -73,6 +75,7 @@
 				1A1100000000000000000028 /* BriefView.swift */,
 				1A110000000000000000002F /* ProfileView.swift */,
 				1A1100000000000000000031 /* InventoryView.swift */,
+				1A1100000000000000000033 /* ImportHistoryView.swift */,
 				1A110000000000000000002A /* Secrets.swift */,
 				1A1100000000000000000015 /* Info.plist */,
 				1A110000000000000000002C /* Assets.xcassets */,
@@ -169,6 +172,7 @@
 				1A1100000000000000000027 /* SeasonalView.swift in Sources */,
 				1A110000000000000000002E /* ProfileView.swift in Sources */,
 				1A1100000000000000000030 /* InventoryView.swift in Sources */,
+				1A1100000000000000000032 /* ImportHistoryView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

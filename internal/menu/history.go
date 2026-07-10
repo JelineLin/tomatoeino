@@ -20,7 +20,9 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
+	"time"
 )
 
 // HistoryStore 是带锁、带落盘的吃饭历史账本。
@@ -76,6 +78,17 @@ func (s *HistoryStore) SetMeal(date, mealField string, m Meal) (stored *Meal, re
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	stored, replaced = s.setMealLocked(date, mealField, m)
+	if err := s.save(); err != nil {
+		return stored, replaced, err
+	}
+	return stored, replaced, nil
+}
+
+// setMealLocked 是 SetMeal / ImportDays 共用的写核心：找到或新建那天、整餐覆盖（结转旧反馈）、
+// 维持升序。调用方【必须已持锁】且已保证 mealField 合法；本函数【不落盘】——批量导入好一次落盘。
+// 返回真正落库的那一餐（含结转反馈）供上层 Upsert。
+func (s *HistoryStore) setMealLocked(date, mealField string, m Meal) (stored *Meal, replaced bool) {
 	idx := -1
 	for i := range s.days {
 		if s.days[i].Date == date {
@@ -86,8 +99,7 @@ func (s *HistoryStore) SetMeal(date, mealField string, m Meal) (stored *Meal, re
 	if idx >= 0 {
 		old := s.days[idx].mealOf(mealField)
 		replaced = old != nil
-		// 结转反馈：record_meal 整餐覆盖时不带 feedback，别把家长已录的反馈抹掉。
-		// 只在新餐没带反馈时结转旧的（未来若支持连反馈一起改，新值优先）。
+		// 结转反馈：整餐覆盖时不带 feedback，别把家长已录的反馈抹掉。
 		if old != nil && old.Feedback != nil && m.Feedback == nil {
 			m.Feedback = old.Feedback
 		}
@@ -100,12 +112,49 @@ func (s *HistoryStore) SetMeal(date, mealField string, m Meal) (stored *Meal, re
 		// ISO 日期（YYYY-MM-DD）的字符串序就是时间序，直接按字符串排。
 		sort.Slice(s.days, func(i, j int) bool { return s.days[i].Date < s.days[j].Date })
 	}
+	return &m, replaced
+}
 
-	// &m 就是刚 setMeal 进去的那份（已含结转反馈），返回它供调用方 Upsert。
-	if err := s.save(); err != nil {
-		return &m, replaced, err
+// WrittenMeal 记录 ImportDays 真正写入的一餐，供上层重建向量 doc（Upsert）。
+type WrittenMeal struct {
+	Date  string
+	Field string
+	Meal  *Meal
+}
+
+// ImportDays 批量导入多天多餐（F1 导入历史用）：一把锁内合并、【一次落盘】
+//（比逐餐 SetMeal 少 N 次文件写）。同天同餐覆盖并结转旧反馈；非法日期、无菜的餐自动跳过，
+// 不污染历史的字符串升序。返回真正写入的餐（供 Upsert）+ 新增/覆盖计数。
+func (s *HistoryStore) ImportDays(days []Day) (written []WrittenMeal, added, replaced int, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, d := range days {
+		date := strings.TrimSpace(d.Date)
+		if _, e := time.Parse("2006-01-02", date); e != nil {
+			continue // 非法日期跳过
+		}
+		for _, mk := range mealOrder {
+			m := d.mealOf(mk.field)
+			if m == nil || len(m.Dishes) == 0 {
+				continue
+			}
+			stored, wasReplaced := s.setMealLocked(date, mk.field, *m)
+			if wasReplaced {
+				replaced++
+			} else {
+				added++
+			}
+			written = append(written, WrittenMeal{Date: date, Field: mk.field, Meal: stored})
+		}
 	}
-	return &m, replaced, nil
+	if len(written) == 0 {
+		return nil, 0, 0, nil // 没有可导入的有效餐——不落盘
+	}
+	if err := s.save(); err != nil {
+		return written, added, replaced, err
+	}
+	return written, added, replaced, nil
 }
 
 // SetFeedback 给 date 那天的 mealField 记一条反馈（fb 传 nil 表示清除反馈）。

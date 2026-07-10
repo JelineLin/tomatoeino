@@ -46,6 +46,8 @@ type server struct {
 	// vision 是进程级共享的视觉模型（图片解析用，图→文字）。它是无状态抽取、跨用户共享，
 	// 不进 per-user workspace。未配置/构建失败时为 nil，图片解析端点会优雅报 503。
 	vision model.BaseChatModel
+	// chat 是进程级共享的文本模型（导入历史时解析粘贴的文字用）。复用注册表那份 cm。
+	chat model.BaseChatModel
 }
 
 func main() {
@@ -82,7 +84,7 @@ func main() {
 	// 3. workspace 注册表：数据在 DATA_DIR/users/<uid>/ 下，按需懒构建。
 	//    进程启动不再等全量 embed——毫秒级起服，谁来了建谁的。
 	reg := newRegistry(envOr("DATA_DIR", "data"), users, embedder, cm)
-	srv := &server{reg: reg, vision: vision}
+	srv := &server{reg: reg, vision: vision, chat: cm}
 
 	// 会话清扫：全局 ticker 遍历所有已建 workspace。goroutine 随进程退出。
 	go func() {
@@ -113,6 +115,8 @@ func main() {
 	mux.HandleFunc("/api/history", srv.handleHistory)
 	mux.HandleFunc("/api/history/feedback", srv.handleFeedback)
 	mux.HandleFunc("/api/history/apply", srv.handleApplyMeal)
+	mux.HandleFunc("/api/history/parse", srv.handleParseHistory)
+	mux.HandleFunc("/api/history/import", srv.handleImportHistory)
 	mux.HandleFunc("/api/seasonal", srv.handleSeasonal)
 	mux.HandleFunc("/api/brief", srv.handleBrief)
 	mux.HandleFunc("/api/inventory", srv.handleInventory)
@@ -321,6 +325,108 @@ func (s *server) handleApplyMeal(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	if err := json.NewEncoder(w).Encode(ws.history.Snapshot()); err != nil {
 		log.Printf("/api/history/apply 编码失败: %v", err)
+	}
+}
+
+// parseHistoryRequest：导入历史的解析请求——文字或图片二选一（图片优先）。
+type parseHistoryRequest struct {
+	Text        string `json:"text"`
+	ImageBase64 string `json:"image_base64"`
+	MIME        string `json:"mime"`
+}
+
+// handleParseHistory 把家长粘贴的文字 / 上传的图片解析成结构化 []Day，返回【预览】——不写库。
+// 文字走 chat 模型，图片走 vision 模型。解析是无状态转写，不进 workspace（withAuth 已保证合法）。
+func (s *server) handleParseHistory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "只支持 POST", http.StatusMethodNotAllowed)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 12<<20)
+	var req parseHistoryRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "请求体不是合法 JSON："+err.Error(), http.StatusBadRequest)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+	defer cancel()
+
+	var days []menu.Day
+	var err error
+	switch {
+	case strings.TrimSpace(req.ImageBase64) != "":
+		if s.vision == nil {
+			http.Error(w, "视觉模型未配置，暂不支持图片导入", http.StatusServiceUnavailable)
+			return
+		}
+		days, err = menu.ParseHistoryImage(ctx, s.vision, req.ImageBase64, req.MIME)
+	case strings.TrimSpace(req.Text) != "":
+		days, err = menu.ParseHistoryText(ctx, s.chat, req.Text)
+	default:
+		http.Error(w, "缺少 text 或 image_base64", http.StatusBadRequest)
+		return
+	}
+	if err != nil {
+		http.Error(w, "解析失败："+err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if err := json.NewEncoder(w).Encode(days); err != nil {
+		log.Printf("/api/history/parse 编码失败: %v", err)
+	}
+}
+
+// importResult 是导入结果：新增/覆盖计数 + 更新后的整份历史（前端直接刷新）。
+type importResult struct {
+	Added    int        `json:"added"`
+	Replaced int        `json:"replaced"`
+	History  []menu.Day `json:"history"`
+}
+
+// handleImportHistory 把家长确认后的 []Day 批量写进历史（ImportDays 一次落盘）+ 批量 Upsert 向量。
+func (s *server) handleImportHistory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "只支持 POST", http.StatusMethodNotAllowed)
+		return
+	}
+	ws, err := s.ws(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 4<<20) // 结构化历史，几百天也够
+	var days []menu.Day
+	if err := json.NewDecoder(r.Body).Decode(&days); err != nil {
+		http.Error(w, "请求体不是合法 JSON："+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if len(days) == 0 {
+		http.Error(w, "没有要导入的记录", http.StatusBadRequest)
+		return
+	}
+
+	written, added, replaced, err := ws.history.ImportDays(days)
+	if err != nil {
+		http.Error(w, "导入落盘失败："+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if len(written) == 0 {
+		http.Error(w, "没有有效的记录可导入（日期需 YYYY-MM-DD、每餐至少一道菜）", http.StatusBadRequest)
+		return
+	}
+	// 批量 Upsert 向量：用 ImportDays 返回的 stored（含结转反馈）重建 doc，让语义检索立刻可查。
+	docs := make([]*schema.Document, 0, len(written))
+	for _, wm := range written {
+		docs = append(docs, menu.BuildMealDocument(wm.Date, wm.Field, wm.Meal))
+	}
+	if err := ws.store.Upsert(r.Context(), docs); err != nil {
+		log.Printf("/api/history/import 向量更新失败（重启自愈）: %v", err)
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if err := json.NewEncoder(w).Encode(importResult{Added: added, Replaced: replaced, History: ws.history.Snapshot()}); err != nil {
+		log.Printf("/api/history/import 编码失败: %v", err)
 	}
 }
 

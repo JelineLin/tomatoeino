@@ -99,6 +99,13 @@ struct EditDish: Codable, Identifiable {
     enum CodingKeys: String, CodingKey { case name, detail }
 }
 
+// ImportResult 是导入历史的结果，对应后端 /api/history/import 的 JSON。
+struct ImportResult: Codable {
+    let added: Int
+    let replaced: Int
+    let history: [Day]
+}
+
 // ChatMessage 是聊天界面里的一条消息。text/thinking 设计成 var，
 // 因为助手回复是流式的——边收 token 边往同一条消息里追加。
 struct ChatMessage: Identifiable {

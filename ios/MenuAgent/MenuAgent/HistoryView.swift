@@ -52,6 +52,7 @@ struct HistoryView: View {
 
     @StateObject private var vm = HistoryViewModel()
     @State private var mode: Mode = .list
+    @State private var showImport = false
 
     var body: some View {
         NavigationStack {
@@ -95,11 +96,21 @@ struct HistoryView: View {
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
+                        showImport = true
+                    } label: {
+                        Image(systemName: "square.and.arrow.down")
+                    }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
                         Task { await vm.load() }
                     } label: {
                         Image(systemName: "arrow.clockwise")
                     }
                 }
+            }
+            .sheet(isPresented: $showImport) {
+                ImportHistoryView { Task { await vm.load() } }
             }
             // 记反馈失败：弹个可关的提示，不动列表/日历（区别于整页加载失败）。
             .alert(
