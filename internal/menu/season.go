@@ -107,7 +107,13 @@ type Season struct {
 	Fruit   []string `json:"fruit"`
 	Aquatic []string `json:"aquatic"`
 	Tip     string   `json:"tip"`
+	Source  string   `json:"source"` // 这批时令数据的来源/依据（诚实交代口径，别暗示第三方权威背书）
 }
+
+// seasonSource 说清这张表是什么、口径如何——全表同源，一句全局说明即可。
+// 措辞如实：人工整理的内置表、华东口径、且为幼儿适口做过筛选（剔除易敏），
+// 不是可点击的权威外部数据源。
+const seasonSource = "内置时令表（人工整理，中国华东口径）；只收适合幼儿的食材——好嚼、低敏、常见易买，螃蟹/贝类等易敏食材已刻意剔除。仅供参考，非官方权威数据。"
 
 // SeasonFor 返回某个月的时令清单。工具走 renderSeason（人话给模型），
 // HTTP 端点走这里（结构化给前端），同一张表两个出口。
@@ -119,6 +125,7 @@ func SeasonFor(m time.Month) Season {
 		Fruit:   e.Fruit,
 		Aquatic: e.Aquatic,
 		Tip:     e.Tip,
+		Source:  seasonSource,
 	}
 }
 

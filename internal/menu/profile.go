@@ -103,6 +103,49 @@ func (s *ProfileStore) Set(p Profile) error {
 	return nil
 }
 
+// Update 合并式更新档案并落盘，是 update_profile 工具与 HTTP 写端点【共用的写核心】——
+// 两条写路径共享同一套语义，避免行为分叉：
+//   - 空字符串字段（名字/生日/要点）保持原值，不覆盖；
+//   - 数组字段（过敏/忌口）为 nil 表示不动，非 nil 则整组替换（传空数组即清空）；
+//   - birthDate 必须是 YYYY-MM-DD 且不在未来；
+//   - 全空 patch 视为无操作，拒绝（不能因为档案本来有内容就把空调用当成功）。
+// 返回更新后的档案副本。错误是给上层自己措辞的裸文案（工具包一层「建档失败」）。
+func (s *ProfileStore) Update(patch Profile) (Profile, error) {
+	if patch.BabyName == "" && patch.BirthDate == "" && patch.Allergies == nil &&
+		patch.Dislikes == nil && patch.Notes == "" {
+		return Profile{}, fmt.Errorf("至少要提供一项要更新的信息")
+	}
+	if patch.BirthDate != "" {
+		t, err := time.Parse("2006-01-02", patch.BirthDate)
+		if err != nil {
+			return Profile{}, fmt.Errorf("出生日期 %q 不是 YYYY-MM-DD 格式", patch.BirthDate)
+		}
+		if t.After(time.Now()) {
+			return Profile{}, fmt.Errorf("出生日期 %s 在未来，请确认后重试", patch.BirthDate)
+		}
+	}
+	p := s.Get()
+	if patch.BabyName != "" {
+		p.BabyName = strings.TrimSpace(patch.BabyName)
+	}
+	if patch.BirthDate != "" {
+		p.BirthDate = patch.BirthDate
+	}
+	if patch.Allergies != nil {
+		p.Allergies = trimAll(patch.Allergies)
+	}
+	if patch.Dislikes != nil {
+		p.Dislikes = trimAll(patch.Dislikes)
+	}
+	if patch.Notes != "" {
+		p.Notes = strings.TrimSpace(patch.Notes)
+	}
+	if err := s.Set(p); err != nil {
+		return Profile{}, err
+	}
+	return p, nil
+}
+
 // ageMonths 按出生日期算当前月龄。日期非法或在未来返回 ok=false。
 func ageMonths(birthDate string, now time.Time) (int, bool) {
 	t, err := time.Parse("2006-01-02", birthDate)

@@ -20,6 +20,8 @@ private struct YearMonth: Hashable, Comparable {
 
 struct CalendarHistoryView: View {
     let days: [Day]
+    // 记反馈的回调：(date, field, rating, note)。由 HistoryView 注入（转调 VM）。
+    var onFeedback: (_ date: String, _ field: String, _ rating: String, _ note: String) -> Void = { _, _, _, _ in }
 
     // 当前展示的月份；nil 表示还没初始化（首次出现时跳到最近有记录的月份）。
     @State private var current: YearMonth?
@@ -157,9 +159,15 @@ struct CalendarHistoryView: View {
                     }
                 }
                 VStack(alignment: .leading, spacing: 12) {
-                    MealRowView(label: "午餐", meal: day.lunch)
-                    MealRowView(label: "水果", meal: day.fruit)
-                    MealRowView(label: "晚餐", meal: day.dinner)
+                    MealRowView(label: "午餐", meal: day.lunch, date: dateStr, field: "lunch") { r, n in
+                        onFeedback(dateStr, "lunch", r, n)
+                    }
+                    MealRowView(label: "水果", meal: day.fruit, date: dateStr, field: "fruit") { r, n in
+                        onFeedback(dateStr, "fruit", r, n)
+                    }
+                    MealRowView(label: "晚餐", meal: day.dinner, date: dateStr, field: "dinner") { r, n in
+                        onFeedback(dateStr, "dinner", r, n)
+                    }
                 }
                 .padding()
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -191,10 +199,18 @@ struct CalendarHistoryView: View {
     }
 }
 
-// 一餐的渲染：图标 + 标签 + 时间徽章 + 菜品清单。列表和日历两个视图共用，保证两边样式一致。
+// 一餐的渲染：图标 + 标签 + 时间徽章 + 菜品清单 + 反馈。列表和日历两个视图共用，样式一致。
+//
+// 反馈可选：只有传了 date/field/onFeedback（列表和日历都传）才显示反馈徽章 + 「加/改反馈」按钮，
+// 点开在 sheet 里选 爱吃/一般/不爱吃 + 可选备注。BriefView 等只读场景不传，就退化成纯展示。
 struct MealRowView: View {
     let label: String
     let meal: Meal?
+    var date: String? = nil
+    var field: String? = nil                              // lunch/fruit/dinner
+    var onFeedback: ((_ rating: String, _ note: String) -> Void)? = nil
+
+    @State private var showEditor = false
 
     // 每餐一个专属图标和颜色：午餐日头橙、水果叶子绿、晚餐月亮蓝紫——扫一眼就分清。
     private var style: (icon: String, color: Color) {
@@ -205,6 +221,8 @@ struct MealRowView: View {
         default: return ("fork.knife", .gray)
         }
     }
+
+    private var canFeedback: Bool { date != nil && field != nil && onFeedback != nil }
 
     var body: some View {
         if let meal, !meal.dishes.isEmpty {
@@ -238,10 +256,111 @@ struct MealRowView: View {
                             }
                         }
                     }
+                    if canFeedback {
+                        feedbackRow(meal)
+                    }
                 }
             }
             .padding(.vertical, 2)
+            .sheet(isPresented: $showEditor) {
+                FeedbackEditorSheet(current: meal.feedback) { rating, note in
+                    onFeedback?(rating, note)
+                }
+            }
         }
+    }
+
+    // 反馈行：已有反馈显示彩色徽章；右侧「加反馈/改」按钮打开编辑 sheet。
+    private func feedbackRow(_ meal: Meal) -> some View {
+        HStack(spacing: 8) {
+            if let fb = meal.feedback {
+                Text(fb.badgeText)
+                    .font(.caption)
+                    .foregroundStyle(fb.tint)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Capsule().fill(fb.tint.opacity(0.15)))
+            }
+            Button {
+                showEditor = true
+            } label: {
+                Label(meal.feedback == nil ? "加反馈" : "改", systemImage: "face.smiling")
+                    .font(.caption)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.tint)
+        }
+        .padding(.top, 3)
+    }
+}
+
+// Feedback 的展示样式（emoji / 中文 / 主题色 / 徽章文案）。放在 View 层，模型层保持纯数据。
+extension Feedback {
+    var emoji: String { ["like": "👍", "dislike": "👎", "ok": "😐"][rating] ?? "•" }
+    var ratingLabel: String { ["like": "爱吃", "dislike": "不爱吃", "ok": "一般"][rating] ?? rating }
+    var tint: Color { ["like": Color.green, "dislike": Color.red, "ok": Color.orange][rating] ?? .gray }
+    var badgeText: String {
+        var s = "\(emoji) \(ratingLabel)"
+        if let n = note, !n.isEmpty { s += " · \(n)" }
+        return s
+    }
+}
+
+// 反馈编辑 sheet：选 爱吃/一般/不爱吃 + 可选备注。已有反馈时多一个「清除」。
+private struct FeedbackEditorSheet: View {
+    let current: Feedback?
+    let onSave: (_ rating: String, _ note: String) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var rating: String
+    @State private var note: String
+
+    init(current: Feedback?, onSave: @escaping (String, String) -> Void) {
+        self.current = current
+        self.onSave = onSave
+        _rating = State(initialValue: current?.rating ?? "like")
+        _note = State(initialValue: current?.note ?? "")
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("宝宝爱吃吗") {
+                    Picker("反馈", selection: $rating) {
+                        Text("👍 爱吃").tag("like")
+                        Text("😐 一般").tag("ok")
+                        Text("👎 不爱吃").tag("dislike")
+                    }
+                    .pickerStyle(.segmented)
+                }
+                Section("备注（可选）") {
+                    TextField("如 只吃了几口 / 换个做法就行", text: $note, axis: .vertical)
+                        .lineLimit(1...3)
+                }
+                if current != nil {
+                    Section {
+                        Button("清除反馈", role: .destructive) {
+                            onSave("", "")
+                            dismiss()
+                        }
+                    }
+                }
+            }
+            .navigationTitle("食用反馈")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("保存") {
+                        onSave(rating, note.trimmingCharacters(in: .whitespacesAndNewlines))
+                        dismiss()
+                    }
+                }
+            }
+        }
+        .presentationDetents([.medium])
     }
 }
 

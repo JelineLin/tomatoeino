@@ -31,6 +31,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/flow/agent/react"
 	"github.com/cloudwego/eino/schema"
 
@@ -42,6 +43,11 @@ import (
 // 按 userID 懒加载（见 workspace.go）。handler 里一律先 s.ws(r) 取当前用户的世界。
 type server struct {
 	reg *registry
+	// vision 是进程级共享的视觉模型（图片解析用，图→文字）。它是无状态抽取、跨用户共享，
+	// 不进 per-user workspace。未配置/构建失败时为 nil，图片解析端点会优雅报 503。
+	vision model.BaseChatModel
+	// chat 是进程级共享的文本模型（导入历史时解析粘贴的文字用）。复用注册表那份 cm。
+	chat model.BaseChatModel
 }
 
 func main() {
@@ -67,11 +73,18 @@ func main() {
 	if err != nil {
 		log.Fatalf("创建 ToolCallingChatModel 失败: %v", err)
 	}
+	// 视觉模型（图片解析用）。构建失败不致命——没有它只是图片解析端点不可用，
+	// 文字功能照常。默认复用 Ark 凭证（见 llm.NewVisionChatModel）。
+	vision, err := llm.NewVisionChatModel(ctx0)
+	if err != nil {
+		log.Printf("⚠️  视觉模型未就绪（图片解析功能不可用，其余照常）: %v", err)
+		vision = nil
+	}
 
 	// 3. workspace 注册表：数据在 DATA_DIR/users/<uid>/ 下，按需懒构建。
 	//    进程启动不再等全量 embed——毫秒级起服，谁来了建谁的。
 	reg := newRegistry(envOr("DATA_DIR", "data"), users, embedder, cm)
-	srv := &server{reg: reg}
+	srv := &server{reg: reg, vision: vision, chat: cm}
 
 	// 会话清扫：全局 ticker 遍历所有已建 workspace。goroutine 随进程退出。
 	go func() {
@@ -100,9 +113,14 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", srv.handleHealth)
 	mux.HandleFunc("/api/history", srv.handleHistory)
+	mux.HandleFunc("/api/history/feedback", srv.handleFeedback)
+	mux.HandleFunc("/api/history/apply", srv.handleApplyMeal)
+	mux.HandleFunc("/api/history/parse", srv.handleParseHistory)
+	mux.HandleFunc("/api/history/import", srv.handleImportHistory)
 	mux.HandleFunc("/api/seasonal", srv.handleSeasonal)
 	mux.HandleFunc("/api/brief", srv.handleBrief)
 	mux.HandleFunc("/api/inventory", srv.handleInventory)
+	mux.HandleFunc("/api/inventory/parse-image", srv.handleParseOrderImage)
 	mux.HandleFunc("/api/profile", srv.handleProfile)
 	mux.HandleFunc("/api/chat", srv.handleChat)
 
@@ -179,6 +197,239 @@ func (s *server) handleHistory(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// feedbackRequest 是前端给某一餐记「儿童食用反馈」的请求体。
+type feedbackRequest struct {
+	Date   string `json:"date"`   // 哪天 YYYY-MM-DD
+	Meal   string `json:"meal"`   // 哪餐 lunch/fruit/dinner
+	Rating string `json:"rating"` // like/dislike/ok；空串=清除这餐的反馈
+	Note   string `json:"note"`   // 备注（可空）
+}
+
+// handleFeedback 给历史里某一餐记反馈（POST 专用）。
+//
+// 写序照 record_meal：① 历史 JSON（权威，SetFeedback）② 向量索引同 ID Upsert（派生，
+// 让 search_meal_history 立刻反映反馈）。这是历史的第二条直写路径（第一条是聊天里的
+// record_meal），共用同一个 ws.history / ws.store，不会两套账。
+func (s *server) handleFeedback(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "只支持 POST", http.StatusMethodNotAllowed)
+		return
+	}
+	ws, err := s.ws(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10) // 反馈是小 JSON，16KB 足够
+	var req feedbackRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "请求体不是合法 JSON："+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	var fb *menu.Feedback
+	if req.Rating != "" {
+		if req.Rating != "like" && req.Rating != "dislike" && req.Rating != "ok" {
+			http.Error(w, "rating 只能是 like/dislike/ok（或空串清除反馈）", http.StatusBadRequest)
+			return
+		}
+		fb = &menu.Feedback{Rating: req.Rating, Note: strings.TrimSpace(req.Note)}
+	}
+
+	// ① 权威视图：历史 JSON + 内存。
+	m, err := ws.history.SetFeedback(req.Date, req.Meal, fb)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	// ② 派生视图：按同一把钥匙（date-mealField）Upsert，让语义检索立刻带上反馈。
+	//    失败不阻断——重启会从 JSON 全量重建自愈（和 record_meal 一个兜底口径）。
+	if err := ws.store.Upsert(r.Context(), []*schema.Document{menu.BuildMealDocument(req.Date, req.Meal, m)}); err != nil {
+		log.Printf("/api/history/feedback 向量更新失败（重启自愈）: %v", err)
+	}
+
+	// 回整份历史，前端直接拿去刷新，省一次 GET。
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if err := json.NewEncoder(w).Encode(ws.history.Snapshot()); err != nil {
+		log.Printf("/api/history/feedback 编码失败: %v", err)
+	}
+}
+
+// applyMealRequest 是「采纳并保存推荐的某一餐」的请求体——家长在前端编辑推荐后点「应用」。
+type applyMealRequest struct {
+	Date   string           `json:"date"`   // YYYY-MM-DD
+	Meal   string           `json:"meal"`   // lunch/fruit/dinner
+	Time   string           `json:"time"`   // 可空
+	Dishes []applyDishInput `json:"dishes"` // 家长编辑后的菜品
+}
+
+type applyDishInput struct {
+	Name   string `json:"name"`
+	Detail string `json:"detail"`
+}
+
+// handleApplyMeal 把（家长编辑后的）推荐的一餐写进历史（POST 专用）。
+//
+// 等价于聊天里的 record_meal，但由家长在前端确认后触发——propose_menu 只登记不入库，
+// 采纳这一步交给家长点「应用」。写序照 record_meal/feedback：
+// ① 历史 JSON（SetMeal，含结转反馈）② 向量 Upsert（用 SetMeal 返回的 stored 渲染，两视图一致）。
+func (s *server) handleApplyMeal(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "只支持 POST", http.StatusMethodNotAllowed)
+		return
+	}
+	ws, err := s.ws(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	var req applyMealRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "请求体不是合法 JSON："+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// 日期必须是具体 YYYY-MM-DD——和 record_meal/propose_menu 一样把关，
+	// 非 ISO 串会污染历史的字符串升序、把 recent_meals 的「最近」搞乱。
+	date := strings.TrimSpace(req.Date)
+	if _, err := time.Parse("2006-01-02", date); err != nil {
+		http.Error(w, "日期不是 YYYY-MM-DD 格式", http.StatusBadRequest)
+		return
+	}
+
+	dishes := make([]menu.Dish, 0, len(req.Dishes))
+	for _, d := range req.Dishes {
+		name := strings.TrimSpace(d.Name)
+		if name == "" {
+			continue
+		}
+		dishes = append(dishes, menu.Dish{Name: name, Detail: strings.TrimSpace(d.Detail)})
+	}
+	if len(dishes) == 0 {
+		http.Error(w, "这一餐至少要有一道菜", http.StatusBadRequest)
+		return
+	}
+
+	// SetMeal 会校验餐别（非法返回 error → 400），并结转旧反馈；返回真正落库的那一餐。
+	stored, _, err := ws.history.SetMeal(date, req.Meal, menu.Meal{Time: strings.TrimSpace(req.Time), Dishes: dishes})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := ws.store.Upsert(r.Context(), []*schema.Document{menu.BuildMealDocument(date, req.Meal, stored)}); err != nil {
+		log.Printf("/api/history/apply 向量更新失败（重启自愈）: %v", err)
+	}
+
+	// 回整份历史，前端直接刷新历史 tab。
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if err := json.NewEncoder(w).Encode(ws.history.Snapshot()); err != nil {
+		log.Printf("/api/history/apply 编码失败: %v", err)
+	}
+}
+
+// parseHistoryRequest：导入历史的解析请求——文字或图片二选一（图片优先）。
+type parseHistoryRequest struct {
+	Text        string `json:"text"`
+	ImageBase64 string `json:"image_base64"`
+	MIME        string `json:"mime"`
+}
+
+// handleParseHistory 把家长粘贴的文字 / 上传的图片解析成结构化 []Day，返回【预览】——不写库。
+// 文字走 chat 模型，图片走 vision 模型。解析是无状态转写，不进 workspace（withAuth 已保证合法）。
+func (s *server) handleParseHistory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "只支持 POST", http.StatusMethodNotAllowed)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 12<<20)
+	var req parseHistoryRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "请求体不是合法 JSON："+err.Error(), http.StatusBadRequest)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+	defer cancel()
+
+	var days []menu.Day
+	var err error
+	switch {
+	case strings.TrimSpace(req.ImageBase64) != "":
+		if s.vision == nil {
+			http.Error(w, "视觉模型未配置，暂不支持图片导入", http.StatusServiceUnavailable)
+			return
+		}
+		days, err = menu.ParseHistoryImage(ctx, s.vision, req.ImageBase64, req.MIME)
+	case strings.TrimSpace(req.Text) != "":
+		days, err = menu.ParseHistoryText(ctx, s.chat, req.Text)
+	default:
+		http.Error(w, "缺少 text 或 image_base64", http.StatusBadRequest)
+		return
+	}
+	if err != nil {
+		http.Error(w, "解析失败："+err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if err := json.NewEncoder(w).Encode(days); err != nil {
+		log.Printf("/api/history/parse 编码失败: %v", err)
+	}
+}
+
+// importResult 是导入结果：新增/覆盖计数 + 更新后的整份历史（前端直接刷新）。
+type importResult struct {
+	Added    int        `json:"added"`
+	Replaced int        `json:"replaced"`
+	History  []menu.Day `json:"history"`
+}
+
+// handleImportHistory 把家长确认后的 []Day 批量写进历史（ImportDays 一次落盘）+ 批量 Upsert 向量。
+func (s *server) handleImportHistory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "只支持 POST", http.StatusMethodNotAllowed)
+		return
+	}
+	ws, err := s.ws(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 4<<20) // 结构化历史，几百天也够
+	var days []menu.Day
+	if err := json.NewDecoder(r.Body).Decode(&days); err != nil {
+		http.Error(w, "请求体不是合法 JSON："+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if len(days) == 0 {
+		http.Error(w, "没有要导入的记录", http.StatusBadRequest)
+		return
+	}
+
+	written, added, replaced, err := ws.history.ImportDays(days)
+	if err != nil {
+		http.Error(w, "导入落盘失败："+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if len(written) == 0 {
+		http.Error(w, "没有有效的记录可导入（日期需 YYYY-MM-DD、每餐至少一道菜）", http.StatusBadRequest)
+		return
+	}
+	// 批量 Upsert 向量：用 ImportDays 返回的 stored（含结转反馈）重建 doc，让语义检索立刻可查。
+	docs := make([]*schema.Document, 0, len(written))
+	for _, wm := range written {
+		docs = append(docs, menu.BuildMealDocument(wm.Date, wm.Field, wm.Meal))
+	}
+	if err := ws.store.Upsert(r.Context(), docs); err != nil {
+		log.Printf("/api/history/import 向量更新失败（重启自愈）: %v", err)
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if err := json.NewEncoder(w).Encode(importResult{Added: added, Replaced: replaced, History: ws.history.Snapshot()}); err != nil {
+		log.Printf("/api/history/import 编码失败: %v", err)
+	}
+}
+
 // handleSeasonal 返回某个月的时令清单，给前端「时令」tab 用。
 // ?month=1..12 指定月份，不传默认当前月。数据和 agent 的 seasonal_produce
 // 工具同源（menu.SeasonFor），一张表两个出口，不会出现两边说法不一致。
@@ -202,41 +453,152 @@ func (s *server) handleSeasonal(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleInventory 返回家庭库存账本，给前端「库存」界面渲染。
-// 数据和 agent 的 list/add/consume_inventory 工具同一本账（menu.InventoryStore），
-// 聊天里 agent 记的账和这里展示的，永远一个口径。改账走聊天（agent 工具），
-// 这里只读——写入口收敛在一处，避免两条写路径打架。
+// inventoryWrite 是库存写操作的请求体：op 决定动作。
+// 用「POST + op 字段」而不是 PUT/DELETE，是为了不动 withCORS 的允许方法集
+//（现在只放行 GET/POST/OPTIONS），也省掉浏览器预检的麻烦。
+type inventoryWrite struct {
+	Op       string  `json:"op"`       // set（设为精确值/新增）| add（累加入库）| remove（删除整条）
+	Name     string  `json:"name"`     //
+	Quantity float64 `json:"quantity"` // set/add 用；remove 忽略
+	Unit     string  `json:"unit"`     // 可空，沿用已有/默认「份」
+}
+
+// handleInventory 读/写家庭库存账本，给前端「库存」界面用。
+//   - GET ：列出库存（?keyword= 子串过滤）。
+//   - POST：增删改（op=set/add/remove）——界面直接编辑走这里。
+//
+// 和聊天里的 list/add/consume_inventory 工具【同一本账】（同一个 ws.inv、同一把锁）——
+// 界面改和 agent 改不会两套账。库存不入向量库（只有历史 embed），所以写完无需 Upsert。
 func (s *server) handleInventory(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "只支持 GET", http.StatusMethodNotAllowed)
-		return
-	}
 	ws, err := s.ws(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	if err := json.NewEncoder(w).Encode(ws.inv.List(r.URL.Query().Get("keyword"))); err != nil {
-		log.Printf("/api/inventory 编码失败: %v", err)
+
+	switch r.Method {
+	case http.MethodGet:
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		if err := json.NewEncoder(w).Encode(ws.inv.List(r.URL.Query().Get("keyword"))); err != nil {
+			log.Printf("/api/inventory 编码失败: %v", err)
+		}
+	case http.MethodPost:
+		r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+		var req inventoryWrite
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "请求体不是合法 JSON："+err.Error(), http.StatusBadRequest)
+			return
+		}
+		switch req.Op {
+		case "set":
+			_, err = ws.inv.Set(req.Name, req.Quantity, req.Unit)
+		case "add":
+			_, err = ws.inv.Add(req.Name, req.Quantity, req.Unit)
+		case "remove":
+			err = ws.inv.Remove(req.Name)
+		default:
+			http.Error(w, "op 只能是 set/add/remove，收到 "+req.Op, http.StatusBadRequest)
+			return
+		}
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		// 回整份账本，前端直接刷新。
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		if err := json.NewEncoder(w).Encode(ws.inv.List("")); err != nil {
+			log.Printf("/api/inventory 写后编码失败: %v", err)
+		}
+	default:
+		http.Error(w, "只支持 GET/POST", http.StatusMethodNotAllowed)
 	}
 }
 
-// handleProfile 返回宝宝档案，给前端展示/确认用。
-// 和其它账本一样：写入口收敛在聊天（update_profile 工具），这里只读。
-func (s *server) handleProfile(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "只支持 GET", http.StatusMethodNotAllowed)
+// parseImageRequest 是上传图片解析的请求体：base64 图片 + MIME 类型。
+type parseImageRequest struct {
+	ImageBase64 string `json:"image_base64"`
+	MIME        string `json:"mime"` // 如 image/jpeg；空则按 jpeg 处理
+}
+
+// handleParseOrderImage 解析「订单截图」为库存条目列表，返回给前端【预览确认】——
+// 本端点【不写库存】。视觉解析不可靠，必须让家长在前端核对/编辑后，再走 add_inventory 入库，
+// 绝不静默改账。解析是无状态抽取，不进 per-user workspace（withAuth 已保证请求合法）。
+func (s *server) handleParseOrderImage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "只支持 POST", http.StatusMethodNotAllowed)
 		return
 	}
+	if s.vision == nil {
+		http.Error(w, "视觉模型未配置，暂不支持图片解析", http.StatusServiceUnavailable)
+		return
+	}
+	// 照片 base64 会到几 MB，放宽到 12MB（iOS 端应先压缩降采样再传）。
+	r.Body = http.MaxBytesReader(w, r.Body, 12<<20)
+	var req parseImageRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "请求体不是合法 JSON："+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.ImageBase64) == "" {
+		http.Error(w, "缺少图片（image_base64 为空）", http.StatusBadRequest)
+		return
+	}
+
+	// 视觉调用可能要几秒到几十秒，单独给个超时。
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+	items, err := menu.ParseOrderImage(ctx, s.vision, req.ImageBase64, req.MIME)
+	if err != nil {
+		http.Error(w, "解析失败："+err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if err := json.NewEncoder(w).Encode(items); err != nil {
+		log.Printf("/api/inventory/parse-image 编码失败: %v", err)
+	}
+}
+
+// handleProfile 读/写宝宝档案，给前端「档案」tab 用。
+//   - GET ：返回当前档案（展示 + 编辑回填）。
+//   - POST：合并式更新档案（界面上改年龄/过敏源等）。
+//
+// 写路径和聊天里的 update_profile 工具【共用同一个 ProfileStore.Update 写核心】——
+// 同一套合并/校验/落盘语义、同一把锁，界面直接改和 agent 改不会两套账。
+// （这有意打破了早先「写只走聊天」的洁癖：直接编辑类 UI 不可能绕聊天走，
+// 代价是历史/档案从此有两条写入路径，但都收敛到同一个 store，安全。）
+func (s *server) handleProfile(w http.ResponseWriter, r *http.Request) {
 	ws, err := s.ws(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	if err := json.NewEncoder(w).Encode(ws.profile.Get()); err != nil {
-		log.Printf("/api/profile 编码失败: %v", err)
+	switch r.Method {
+	case http.MethodGet:
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		if err := json.NewEncoder(w).Encode(ws.profile.Get()); err != nil {
+			log.Printf("/api/profile 编码失败: %v", err)
+		}
+	case http.MethodPost:
+		// 档案是小 JSON，64KB 足够；挡掉异常大包。
+		r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+		var patch menu.Profile
+		if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+			http.Error(w, "请求体不是合法档案 JSON："+err.Error(), http.StatusBadRequest)
+			return
+		}
+		// 合并语义：空字符串字段保持原值，非 nil 数组整组替换（传空数组即清空）。
+		p, err := ws.profile.Update(patch)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		if err := json.NewEncoder(w).Encode(p); err != nil {
+			log.Printf("/api/profile 写后编码失败: %v", err)
+		}
+	default:
+		http.Error(w, "只支持 GET/POST", http.StatusMethodNotAllowed)
 	}
 }
 

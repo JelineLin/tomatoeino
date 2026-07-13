@@ -155,6 +155,55 @@ func (s *InventoryStore) Consume(name string, qty float64) (InventoryItem, bool,
 	return *it, false, s.save()
 }
 
+// Set 把某样食材设为【精确份数】（界面编辑用，区别于 Add 的累加充值）。
+// name 不存在则新增一条。qty 必须 > 0——要删除整条走 Remove，别用 Set 0。
+// unit 传空则沿用已有/默认「份」。返回设置后的条目。
+func (s *InventoryStore) Set(name string, qty float64, unit string) (InventoryItem, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return InventoryItem{}, fmt.Errorf("食材名不能为空")
+	}
+	if qty <= 0 {
+		return InventoryItem{}, fmt.Errorf("份数必须大于 0（删除整条请用删除），收到 %s", fmtQty(qty))
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.items {
+		if s.items[i].Name == name {
+			s.items[i].Quantity = qty
+			if unit != "" {
+				s.items[i].Unit = unit
+			}
+			return s.items[i], s.save()
+		}
+	}
+	if unit == "" {
+		unit = "份"
+	}
+	it := InventoryItem{Name: name, Quantity: qty, Unit: unit}
+	s.items = append(s.items, it)
+	return it, s.save()
+}
+
+// Remove 按精确名称删除整条库存（界面划删用）。不存在则报错，让调用方知道没删到。
+func (s *InventoryStore) Remove(name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("食材名不能为空")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.items {
+		if s.items[i].Name == name {
+			s.items = append(s.items[:i], s.items[i+1:]...)
+			return s.save()
+		}
+	}
+	return fmt.Errorf("库存里没有「%s」", name)
+}
+
 // save 全量落盘：临时文件 + rename 原子替换。调用方必须已持有锁。
 func (s *InventoryStore) save() error {
 	raw, err := json.MarshalIndent(s.items, "", "  ")

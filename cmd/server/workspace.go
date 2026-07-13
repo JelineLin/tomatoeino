@@ -26,6 +26,7 @@ import (
 	"github.com/cloudwego/eino/flow/agent/react"
 
 	"tomatoeino/internal/menu"
+	"tomatoeino/internal/vectorstore"
 )
 
 // workspace 是一个用户的完整世界。
@@ -33,8 +34,9 @@ type workspace struct {
 	agent    *react.Agent
 	history  *menu.HistoryStore
 	inv      *menu.InventoryStore
-	profile  *menu.ProfileStore // 宝宝档案：动态注入该户 agent 的人设
-	sessions *sessionStore      // L2 会话下沉到 workspace = 天然按用户隔离
+	profile  *menu.ProfileStore   // 宝宝档案：动态注入该户 agent 的人设
+	store    *vectorstore.Store   // 该户内存向量库：界面直写历史后按同 ID Upsert 更新语义索引
+	sessions *sessionStore        // L2 会话下沉到 workspace = 天然按用户隔离
 	briefs   *briefStore
 }
 
@@ -141,6 +143,7 @@ func (r *registry) build(ctx context.Context, uid string) (*workspace, error) {
 		history:  asm.History,
 		inv:      asm.Inv,
 		profile:  asm.Profile,
+		store:    asm.Store,
 		sessions: newSessionStore(sessionTTL),
 		briefs:   &briefStore{},
 	}, nil

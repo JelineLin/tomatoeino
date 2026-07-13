@@ -147,9 +147,21 @@ func NewTools(store *vectorstore.Store, hs *HistoryStore, inv *InventoryStore, p
 		return nil, fmt.Errorf("创建 update_profile 工具失败: %w", err)
 	}
 
+	proposeTool, err := utils.InferTool(
+		"propose_menu",
+		"给出【成套的三餐推荐】时调用它，把你要推荐的 午餐/水果/晚餐 以结构化形式登记一份"+
+			"（家长端据此显示成可逐项编辑、可一键采纳入库的卡片）。登记后【继续照常】写文字版推荐。"+
+			"只在给出具体成套餐次推荐时用（尤其每日简报）；单纯答疑、查历史不调。"+
+			"它只登记不入库——真正入库由家长在前端点「应用」触发，你不要因此去调 record_meal。",
+		makeProposeMenu(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("创建 propose_menu 工具失败: %w", err)
+	}
+
 	return []tool.BaseTool{
 		searchTool, recentTool, ingredientTool, seasonTool, askTool,
-		listInvTool, addInvTool, consumeInvTool, recordTool, profileTool,
+		listInvTool, addInvTool, consumeInvTool, recordTool, profileTool, proposeTool,
 	}, nil
 }
 
@@ -378,13 +390,14 @@ func makeRecordMeal(hs *HistoryStore, store *vectorstore.Store) func(context.Con
 		m := Meal{Time: strings.TrimSpace(in.Time), Dishes: dishes}
 
 		// ① 权威视图：JSON + 内存。成功即「真相已记」。
-		replaced, err := hs.SetMeal(in.Date, in.Meal, m)
+		stored, replaced, err := hs.SetMeal(in.Date, in.Meal, m)
 		if err != nil {
 			return "入库失败：" + err.Error(), nil
 		}
 
 		// ② 派生视图：向量索引按同一把钥匙（date-mealField）Upsert，旧向量不留尸体。
-		if err := store.Upsert(ctx, []*schema.Document{BuildMealDocument(in.Date, in.Meal, &m)}); err != nil {
+		//    用 stored（含结转反馈）而非本地 m——否则覆盖有反馈的餐时向量会丢反馈。
+		if err := store.Upsert(ctx, []*schema.Document{BuildMealDocument(in.Date, in.Meal, stored)}); err != nil {
 			return fmt.Sprintf("已记入历史，但语义索引更新失败（服务重启后会自愈）：%v", err), nil
 		}
 
@@ -414,40 +427,17 @@ func makeUpdateProfile(ps *ProfileStore) func(context.Context, profileInput) (st
 		toolLog(ctx, "update_profile(name=%q birth=%q allergies=%d dislikes=%d)",
 			in.BabyName, in.BirthDate, len(in.Allergies), len(in.Dislikes))
 
-		// 空调用在输入层就拒绝——不能因为档案本来有内容就把无操作当成功。
-		if in.BabyName == "" && in.BirthDate == "" && in.Allergies == nil &&
-			in.Dislikes == nil && in.Notes == "" {
-			return "建档失败：至少要提供一项要更新的信息。", nil
-		}
-
-		if in.BirthDate != "" {
-			t, err := time.Parse("2006-01-02", in.BirthDate)
-			if err != nil {
-				return fmt.Sprintf("建档失败：出生日期 %q 不是 YYYY-MM-DD 格式。", in.BirthDate), nil
-			}
-			if t.After(time.Now()) {
-				return fmt.Sprintf("建档失败：出生日期 %s 在未来，请确认后重试。", in.BirthDate), nil
-			}
-		}
-
-		p := ps.Get()
-		if in.BabyName != "" {
-			p.BabyName = strings.TrimSpace(in.BabyName)
-		}
-		if in.BirthDate != "" {
-			p.BirthDate = in.BirthDate
-		}
-		if in.Allergies != nil {
-			p.Allergies = trimAll(in.Allergies)
-		}
-		if in.Dislikes != nil {
-			p.Dislikes = trimAll(in.Dislikes)
-		}
-		if in.Notes != "" {
-			p.Notes = strings.TrimSpace(in.Notes)
-		}
-		if err := ps.Set(p); err != nil {
-			return "建档失败：" + err.Error(), nil
+		// 合并/校验/落盘的写核心收敛在 ProfileStore.Update，和 HTTP 写端点同源。
+		// 工具只负责把裸错误包成给模型自纠的人话。
+		p, err := ps.Update(Profile{
+			BabyName:  in.BabyName,
+			BirthDate: in.BirthDate,
+			Allergies: in.Allergies,
+			Dislikes:  in.Dislikes,
+			Notes:     in.Notes,
+		})
+		if err != nil {
+			return "建档失败：" + err.Error() + "。", nil
 		}
 		return "已更新宝宝档案。" + renderProfile(p, time.Now()), nil
 	}

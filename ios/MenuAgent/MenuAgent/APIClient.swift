@@ -35,6 +35,30 @@ struct APIClient {
         return try JSONDecoder().decode([Day].self, from: data)
     }
 
+    // MARK: - 历史反馈
+
+    // submitFeedback 给某一餐记「儿童食用反馈」（POST /api/history/feedback）。
+    // rating 传 like/dislike/ok，空串表示清除该餐反馈。后端写完返回整份历史，直接拿去刷新。
+    func submitFeedback(date: String, meal: String, rating: String, note: String) async throws -> [Day] {
+        struct Body: Encodable {
+            let date: String
+            let meal: String
+            let rating: String
+            let note: String
+        }
+        var req = authorizedRequest(baseURL.appendingPathComponent("api/history/feedback"))
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONEncoder().encode(Body(date: date, meal: meal, rating: rating, note: note))
+        let (data, response) = try await URLSession.shared.data(for: req)
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            let msg = String(data: data, encoding: .utf8).flatMap { $0.isEmpty ? nil : $0 }
+                ?? "HTTP \(http.statusCode)"
+            throw APIError.server(msg)
+        }
+        return try JSONDecoder().decode([Day].self, from: data)
+    }
+
     // MARK: - 时令
 
     // fetchSeasonal 查某个月的应季食材。month 传 nil 表示当前月（由后端定，
@@ -50,6 +74,138 @@ struct APIClient {
         let (data, response) = try await URLSession.shared.data(for: authorizedRequest(components.url!))
         try Self.checkOK(response)
         return try JSONDecoder().decode(Season.self, from: data)
+    }
+
+    // MARK: - 导入历史
+
+    // parseHistoryText 把粘贴的文字解析成结构化历史（预览，后端不写库）。视觉/文本解析慢，超时放宽。
+    func parseHistoryText(text: String) async throws -> [Day] {
+        struct Body: Encodable { let text: String }
+        return try await postJSON("api/history/parse", Body(text: text), timeout: 90)
+    }
+
+    // parseHistoryImage 把菜单/记录截图解析成结构化历史（预览，后端不写库）。
+    func parseHistoryImage(imageBase64: String, mime: String) async throws -> [Day] {
+        struct Body: Encodable { let image_base64: String; let mime: String }
+        return try await postJSON("api/history/parse", Body(image_base64: imageBase64, mime: mime), timeout: 90)
+    }
+
+    // importHistory 把家长确认后的历史批量写入（后端 ImportDays 一次落盘）。
+    func importHistory(_ days: [Day]) async throws -> ImportResult {
+        return try await postJSON("api/history/import", days, timeout: 60)
+    }
+
+    // postJSON 是「POST JSON body、拿 JSON 回来、非2xx 抛后端中文错误」的统一小工具。
+    private func postJSON<T: Encodable, R: Decodable>(_ path: String, _ body: T, timeout: TimeInterval = 30) async throws -> R {
+        var req = authorizedRequest(baseURL.appendingPathComponent(path))
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONEncoder().encode(body)
+        req.timeoutInterval = timeout
+        let (data, response) = try await URLSession.shared.data(for: req)
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            let msg = String(data: data, encoding: .utf8).flatMap { $0.isEmpty ? nil : $0 }
+                ?? "HTTP \(http.statusCode)"
+            throw APIError.server(msg)
+        }
+        return try JSONDecoder().decode(R.self, from: data)
+    }
+
+    // MARK: - 库存
+
+    // fetchInventory 拉取家庭库存（GET /api/inventory，可选 keyword 子串过滤）。
+    func fetchInventory(keyword: String = "") async throws -> [InventoryItem] {
+        var comps = URLComponents(
+            url: baseURL.appendingPathComponent("api/inventory"),
+            resolvingAgainstBaseURL: false
+        )!
+        if !keyword.isEmpty {
+            comps.queryItems = [URLQueryItem(name: "keyword", value: keyword)]
+        }
+        let (data, response) = try await URLSession.shared.data(for: authorizedRequest(comps.url!))
+        try Self.checkOK(response)
+        return try JSONDecoder().decode([InventoryItem].self, from: data)
+    }
+
+    // 库存写操作：add=累加入库、set=设为精确值、remove=删除整条。后端写完返回整份账本。
+    func addInventory(name: String, quantity: Double, unit: String) async throws -> [InventoryItem] {
+        try await writeInventory(op: "add", name: name, quantity: quantity, unit: unit)
+    }
+
+    func setInventory(name: String, quantity: Double, unit: String) async throws -> [InventoryItem] {
+        try await writeInventory(op: "set", name: name, quantity: quantity, unit: unit)
+    }
+
+    func removeInventory(name: String) async throws -> [InventoryItem] {
+        try await writeInventory(op: "remove", name: name, quantity: 0, unit: "")
+    }
+
+    // parseOrderImage 上传订单截图，视觉模型解析成库存条目列表（返回预览，后端不入库）。
+    // 家长在前端确认/编辑后，再逐条走 addInventory 入库。视觉解析慢，超时放宽到 90s。
+    func parseOrderImage(imageBase64: String, mime: String) async throws -> [InventoryItem] {
+        struct Body: Encodable {
+            let image_base64: String
+            let mime: String
+        }
+        var req = authorizedRequest(baseURL.appendingPathComponent("api/inventory/parse-image"))
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONEncoder().encode(Body(image_base64: imageBase64, mime: mime))
+        req.timeoutInterval = 90
+        let (data, response) = try await URLSession.shared.data(for: req)
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            let msg = String(data: data, encoding: .utf8).flatMap { $0.isEmpty ? nil : $0 }
+                ?? "HTTP \(http.statusCode)"
+            throw APIError.server(msg)
+        }
+        return try JSONDecoder().decode([InventoryItem].self, from: data)
+    }
+
+    private func writeInventory(op: String, name: String, quantity: Double, unit: String) async throws -> [InventoryItem] {
+        struct Body: Encodable {
+            let op: String
+            let name: String
+            let quantity: Double
+            let unit: String
+        }
+        var req = authorizedRequest(baseURL.appendingPathComponent("api/inventory"))
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONEncoder().encode(Body(op: op, name: name, quantity: quantity, unit: unit))
+        let (data, response) = try await URLSession.shared.data(for: req)
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            let msg = String(data: data, encoding: .utf8).flatMap { $0.isEmpty ? nil : $0 }
+                ?? "HTTP \(http.statusCode)"
+            throw APIError.server(msg)
+        }
+        return try JSONDecoder().decode([InventoryItem].self, from: data)
+    }
+
+    // MARK: - 档案
+
+    // fetchProfile 拉取宝宝档案（GET /api/profile）。空档案也会正常返回（字段大多缺省）。
+    func fetchProfile() async throws -> Profile {
+        let url = baseURL.appendingPathComponent("api/profile")
+        let (data, response) = try await URLSession.shared.data(for: authorizedRequest(url))
+        try Self.checkOK(response)
+        return try JSONDecoder().decode(Profile.self, from: data)
+    }
+
+    // updateProfile 提交档案更新（POST /api/profile）。后端做合并/校验/落盘，返回更新后的档案。
+    // 合并语义：空字符串字段保持原值，非 nil 数组整组替换（传空数组即清空）。
+    // 出错（如生日格式/未来）时后端会给中文说明，这里原样抛出给界面展示。
+    func updateProfile(_ profile: Profile) async throws -> Profile {
+        var req = authorizedRequest(baseURL.appendingPathComponent("api/profile"))
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONEncoder().encode(profile)
+        let (data, response) = try await URLSession.shared.data(for: req)
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            let msg = String(data: data, encoding: .utf8).flatMap { $0.isEmpty ? nil : $0 }
+                ?? "HTTP \(http.statusCode)"
+            throw APIError.server(msg)
+        }
+        return try JSONDecoder().decode(Profile.self, from: data)
     }
 
     // MARK: - 今日简报
@@ -76,6 +232,36 @@ struct APIClient {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601 // 后端已截断到秒，标准 ISO8601 直接解
         return try decoder.decode(DailyBrief.self, from: data)
+    }
+
+    // applyMeal 采纳（家长编辑后的）推荐的一餐，写进历史（POST /api/history/apply）。
+    // 后端等价于 record_meal，但由家长确认后触发。返回更新后的整份历史。
+    func applyMeal(date: String, meal: String, time: String, dishes: [EditDish]) async throws -> [Day] {
+        struct DishBody: Encodable {
+            let name: String
+            let detail: String
+        }
+        struct Body: Encodable {
+            let date: String
+            let meal: String
+            let time: String
+            let dishes: [DishBody]
+        }
+        let body = Body(
+            date: date, meal: meal, time: time,
+            dishes: dishes.map { DishBody(name: $0.name, detail: $0.detail) }
+        )
+        var req = authorizedRequest(baseURL.appendingPathComponent("api/history/apply"))
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONEncoder().encode(body)
+        let (data, response) = try await URLSession.shared.data(for: req)
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            let msg = String(data: data, encoding: .utf8).flatMap { $0.isEmpty ? nil : $0 }
+                ?? "HTTP \(http.statusCode)"
+            throw APIError.server(msg)
+        }
+        return try JSONDecoder().decode([Day].self, from: data)
     }
 
     // MARK: - 流式对话
