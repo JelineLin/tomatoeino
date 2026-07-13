@@ -50,10 +50,22 @@ endif
 		--generate-notes
 	@echo "✅ Release $(VERSION) 已发布（附 server-linux-amd64）"
 
-# 部署到 hermas。踩坑实录：scp 直接覆盖在跑的二进制会报 text file busy——
-# 必须先传到临时路径，再 sudo mv 覆盖（rename 对运行中的文件合法），最后重启。
+# 部署到 hermas。两个踩坑实录：
+#   ① scp 直接覆盖在跑的二进制会报 text file busy——先传临时路径，再 sudo mv 覆盖
+#     （rename 对运行中的文件合法），最后重启。
+#   ② 27M 走公网 scp 常中途断线（Broken pipe）——改 rsync -z 压缩 + --partial 断点续传
+#     + 自动重试，md5 校验一致才覆盖线上，绝不拿半截文件重启服务。
 deploy: linux
-	scp $(BINARY) $(HOST):/tmp/menuagent-server.new
+	@ok=0; for i in 1 2 3 4 5 6 7 8; do \
+		echo "── 传输尝试 $$i ──"; \
+		rsync -z --partial --timeout=60 -e "ssh -o ServerAliveInterval=10 -o ServerAliveCountMax=3" \
+			$(BINARY) $(HOST):/tmp/menuagent-server.new && { ok=1; break; }; \
+		sleep 3; \
+	done; test $$ok -eq 1 || { echo "❌ 传输失败（8 次重试用尽）"; exit 1; }
+	@LOCAL=$$(md5 -q $(BINARY)); \
+	REMOTE_SUM=$$(ssh $(HOST) "md5sum /tmp/menuagent-server.new | cut -d' ' -f1"); \
+	test "$$LOCAL" = "$$REMOTE_SUM" || { echo "❌ md5 不一致（$$LOCAL vs $$REMOTE_SUM），不覆盖"; exit 1; }; \
+	echo "  md5 一致：$$LOCAL"
 	ssh $(HOST) 'sudo mv /tmp/menuagent-server.new $(REMOTE) \
 		&& sudo chmod 755 $(REMOTE) \
 		&& sudo systemctl restart menuagent \
