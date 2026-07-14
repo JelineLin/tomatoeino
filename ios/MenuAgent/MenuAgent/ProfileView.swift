@@ -111,6 +111,14 @@ struct ProfileView: View {
     }
 
     private var form: some View {
+        editableForm
+            // 聊天里 update_profile 改的档案要能拉到最新。这页【不】随 tab 出现自动重拉——
+            // 表单是就地编辑，自动重拉会把正打到一半、还没保存的内容冲掉；
+            // 想同步聊天里的修改时下拉一下，用户主动、时机自己挑。
+            .refreshable { await vm.load() }
+    }
+
+    private var editableForm: some View {
         Form {
             if let note = vm.savedNote {
                 Section {

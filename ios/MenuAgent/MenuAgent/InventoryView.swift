@@ -61,7 +61,11 @@ final class InventoryViewModel: ObservableObject {
         do {
             items = try await api.fetchInventory()
         } catch {
-            errorText = error.localizedDescription
+            // 手上已有旧账时刷新失败就静默保留旧账（切 tab 自动刷新在弱网下会偶发失败，
+            // 不该拿横幅骚扰）；只有空账本拉不到才值得报错。
+            if items.isEmpty {
+                errorText = error.localizedDescription
+            }
         }
         loaded = true
     }
@@ -153,8 +157,10 @@ struct InventoryView: View {
                 Text(vm.parseError ?? "")
             }
         }
+        // 每次 tab 出现都重拉：聊天里让助手记的账（add/consume_inventory）改的是服务端，
+        // 只加载一次的话切过来看到的永远是首屏旧快照。家庭规模一次 GET 很便宜。
         .task {
-            if !vm.loaded { await vm.load() }
+            await vm.load()
         }
         .onChange(of: photoItem) { newItem in
             Task { await handlePickedPhoto(newItem) }

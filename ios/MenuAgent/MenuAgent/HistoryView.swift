@@ -21,7 +21,12 @@ final class HistoryViewModel: ObservableObject {
             // 后端按日期升序返回，这里倒过来——最近的排最前面，符合「翻看最近吃了啥」的直觉。
             days = try await api.fetchHistory().reversed()
         } catch {
-            errorText = error.localizedDescription
+            // errorText 是整屏替换的致命门，只配给「一条数据都没有」的首载失败；
+            // 已有数据时（切 tab 自动刷新/手动刷新偶发失败）静默保留旧列表——
+            // 旧数据可看，比一屏错误有用。
+            if days.isEmpty {
+                errorText = error.localizedDescription
+            }
         }
         isLoading = false
     }
@@ -122,8 +127,10 @@ struct HistoryView: View {
                 Text(vm.actionError ?? "")
             }
         }
+        // 每次 tab 出现都重拉：聊天里 record_meal 记的餐、记的反馈都写在服务端，
+        // 只加载一次的话切过来看不到最新历史。
         .task {
-            if vm.days.isEmpty { await vm.load() }
+            await vm.load()
         }
     }
 
