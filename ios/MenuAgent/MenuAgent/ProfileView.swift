@@ -16,6 +16,8 @@ final class ProfileViewModel: ObservableObject {
     @Published var allergies: [String] = []
     @Published var dislikes: [String] = []
     @Published var notes = ""
+    // 偏好规律：后端依据每道菜的食用反馈自动归纳，只读展示（不参与编辑/保存）。
+    @Published var rules: [PrefRule] = []
 
     @Published var loaded = false         // 首次加载完成（用于区分「加载中」和「保存中」）
     @Published var isSaving = false
@@ -55,6 +57,7 @@ final class ProfileViewModel: ObservableObject {
         allergies = p.allergies ?? []
         dislikes = p.dislikes ?? []
         notes = p.notes ?? ""
+        rules = p.rules ?? []
     }
 
     func save() async {
@@ -166,7 +169,47 @@ struct ProfileView: View {
                 TextField("咀嚼能力、口味倾向等（可留空）", text: $vm.notes, axis: .vertical)
                     .lineLimit(1...4)
             }
+
+            // 偏好规律：后端依据每道菜的食用反馈归纳出的推荐规则，只读。
+            // 有节制地展示：每条一个菜名 + 计数徽章 + 一句建议，条数由后端截断，不铺台账。
+            if !vm.rules.isEmpty {
+                Section {
+                    ForEach(vm.rules) { rule in
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack(spacing: 6) {
+                                Text(rule.name).font(.callout.weight(.medium))
+                                if rule.likes > 0 {
+                                    countBadge("👍\(rule.likes)", .green)
+                                }
+                                if rule.dislikes > 0 {
+                                    countBadge("👎\(rule.dislikes)", .red)
+                                }
+                                if rule.oks > 0 {
+                                    countBadge("😐\(rule.oks)", .orange)
+                                }
+                            }
+                            Text(rule.advice)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.vertical, 2)
+                    }
+                } header: {
+                    Text("偏好规律（自动归纳）")
+                } footer: {
+                    Text("依据每道菜的食用反馈自动归纳，随反馈更新。推荐时：爱吃的适当多排，不爱吃的少排但不会完全不推；过敏原才是绝对排除。")
+                }
+            }
         }
+    }
+
+    private func countBadge(_ text: String, _ color: Color) -> some View {
+        Text(text)
+            .font(.caption2)
+            .foregroundStyle(color)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Capsule().fill(color.opacity(0.12)))
     }
 
     // 按生日算一句人话年龄，给编辑时一个直观反馈（后端存生日、月龄现算，这里只为展示）。

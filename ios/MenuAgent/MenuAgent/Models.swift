@@ -14,23 +14,24 @@ struct Day: Codable, Identifiable {
     var id: String { date }
 }
 
-// Meal 是某一餐：几点吃 + 一组菜 + 可选的儿童食用反馈。
+// Meal 是某一餐：几点吃 + 一组菜 + 旧数据遗留的餐级反馈（只读展示，新反馈在菜上）。
 struct Meal: Codable {
     let time: String
     let dishes: [Dish]
-    let feedback: Feedback?   // 可选：旧数据/没反馈的餐缺这个字段，正常解码
+    let feedback: Feedback?   // 旧粒度（整餐一条），保留展示；新反馈记在 Dish.feedback
 }
 
-// Feedback 是家长给某一餐的反馈，对应后端 Meal.feedback。
-struct Feedback: Codable {
+// Feedback 是家长记的食用反馈。现在挂在 Dish 上（菜级粒度）；Meal 上的是旧数据。
+struct Feedback: Codable, Hashable {
     let rating: String   // like（爱吃）/ dislike（不爱吃）/ ok（一般）
     let note: String?
 }
 
-// Dish 是一道菜：菜名 + 做法/分量明细。
+// Dish 是一道菜：菜名 + 做法/分量明细 + 可选的菜级食用反馈。
 struct Dish: Codable, Hashable {
     let name: String
     let detail: String
+    let feedback: Feedback?   // 旧后端/没反馈时缺字段，正常解码
 }
 
 // Season 是某个月的时令清单，对应后端 /api/seasonal 的 JSON。
@@ -62,6 +63,20 @@ struct Profile: Codable {
     var allergies: [String]?   // 过敏原（硬禁忌，建议时绝对排除）
     var dislikes: [String]?    // 不吃/不爱吃（软偏好）
     var notes: String?         // 其他要点
+    // 偏好规律（后端依据菜级反馈自动归纳，随 GET/POST 响应下发）。
+    // 只读派生数据：展示用，编辑保存时保持 nil 不回传（后端也不收它）。
+    var rules: [PrefRule]? = nil
+}
+
+// PrefRule 是后端归纳的一条口味规律：某道菜的反馈计数 + 一句人话建议。
+struct PrefRule: Codable, Identifiable {
+    let name: String
+    let likes: Int
+    let dislikes: Int
+    let oks: Int
+    let advice: String
+
+    var id: String { name }
 }
 
 // DailyBrief 是后端定时生成的「今日备餐简报」，对应 /api/brief 的 JSON。

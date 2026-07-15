@@ -197,19 +197,21 @@ func (s *server) handleHistory(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// feedbackRequest 是前端给某一餐记「儿童食用反馈」的请求体。
+// feedbackRequest 是前端记「儿童食用反馈」的请求体。
+// dish 带菜名 = 菜级反馈（当前粒度）；dish 空 = 餐级（兼容旧客户端，语义不变）。
 type feedbackRequest struct {
-	Date   string `json:"date"`   // 哪天 YYYY-MM-DD
-	Meal   string `json:"meal"`   // 哪餐 lunch/fruit/dinner
-	Rating string `json:"rating"` // like/dislike/ok；空串=清除这餐的反馈
-	Note   string `json:"note"`   // 备注（可空）
+	Date   string `json:"date"`           // 哪天 YYYY-MM-DD
+	Meal   string `json:"meal"`           // 哪餐 lunch/fruit/dinner
+	Dish   string `json:"dish,omitempty"` // 哪道菜（菜名精确匹配）；空=整餐
+	Rating string `json:"rating"`         // like/dislike/ok；空串=清除反馈
+	Note   string `json:"note"`           // 备注（可空）
 }
 
-// handleFeedback 给历史里某一餐记反馈（POST 专用）。
+// handleFeedback 给历史里某道菜（或整餐，兼容旧客户端）记反馈（POST 专用）。
 //
-// 写序照 record_meal：① 历史 JSON（权威，SetFeedback）② 向量索引同 ID Upsert（派生，
-// 让 search_meal_history 立刻反映反馈）。这是历史的第二条直写路径（第一条是聊天里的
-// record_meal），共用同一个 ws.history / ws.store，不会两套账。
+// 写序照 record_meal：① 历史 JSON（权威，SetDishFeedback/SetFeedback）② 向量索引
+// 同 ID Upsert（派生，让 search_meal_history 立刻反映反馈）。这是历史的第二条直写路径
+//（第一条是聊天里的 record_meal），共用同一个 ws.history / ws.store，不会两套账。
 func (s *server) handleFeedback(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "只支持 POST", http.StatusMethodNotAllowed)
@@ -236,8 +238,15 @@ func (s *server) handleFeedback(w http.ResponseWriter, r *http.Request) {
 		fb = &menu.Feedback{Rating: req.Rating, Note: strings.TrimSpace(req.Note)}
 	}
 
-	// ① 权威视图：历史 JSON + 内存。
-	m, err := ws.history.SetFeedback(req.Date, req.Meal, fb)
+	// ① 权威视图：历史 JSON + 内存。带菜名走菜级，否则整餐（旧客户端）。
+	var (
+		m *menu.Meal
+	)
+	if strings.TrimSpace(req.Dish) != "" {
+		m, err = ws.history.SetDishFeedback(req.Date, req.Meal, req.Dish, fb)
+	} else {
+		m, err = ws.history.SetFeedback(req.Date, req.Meal, fb)
+	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -573,12 +582,23 @@ func (s *server) handleProfile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
-	switch r.Method {
-	case http.MethodGet:
+	// 响应 = 档案本体 + 依据食用反馈归纳的「偏好规律」（只读、派生自历史，档案页展示用）。
+	// 内嵌展开：JSON 里 rules 和档案字段平铺，旧客户端解码时忽略未知键，不破兼容。
+	type profileResponse struct {
+		menu.Profile
+		Rules []menu.PrefRule `json:"rules"`
+	}
+	respond := func(p menu.Profile) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		if err := json.NewEncoder(w).Encode(ws.profile.Get()); err != nil {
+		resp := profileResponse{Profile: p, Rules: menu.BuildPrefRules(ws.history.Snapshot())}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
 			log.Printf("/api/profile 编码失败: %v", err)
 		}
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		respond(ws.profile.Get())
 	case http.MethodPost:
 		// 档案是小 JSON，64KB 足够；挡掉异常大包。
 		r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
@@ -593,10 +613,7 @@ func (s *server) handleProfile(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		if err := json.NewEncoder(w).Encode(p); err != nil {
-			log.Printf("/api/profile 写后编码失败: %v", err)
-		}
+		respond(p)
 	default:
 		http.Error(w, "只支持 GET/POST", http.StatusMethodNotAllowed)
 	}

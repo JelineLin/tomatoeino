@@ -37,18 +37,20 @@ type Meal struct {
 	Feedback *Feedback `json:"feedback,omitempty"` // 家长给这一餐的反馈；nil=还没反馈（omitempty 兼容旧数据）
 }
 
-// Feedback 是家长给某一餐的「儿童食用反馈」——爱吃/不爱吃/一般 + 可选备注。
-// 挂在 Meal 上（餐级粒度，对齐「一餐一条向量」）；agent 建议时会读到并权衡：
-// 不爱吃的餐/做法尽量避开或改良，爱吃的可复现借鉴。
+// Feedback 是家长记的「儿童食用反馈」——爱吃/不爱吃/一般 + 可选备注。
+// 现挂在 Dish 上（菜级粒度：一餐里粥爱吃、青菜不爱吃是常态，餐级一刀切分不清功过）；
+// Meal 上的同名字段保留是为了兼容旧数据（只读展示，新反馈一律记到菜上）。
+// agent 建议时读到并按频率权衡：不爱吃的降低出现频率但不完全排除，爱吃的适当多安排。
 type Feedback struct {
 	Rating string `json:"rating"`         // like（爱吃）/ dislike（不爱吃）/ ok（一般）
 	Note   string `json:"note,omitempty"` // 备注，如「只吃了几口」「换个做法就行」
 }
 
-// Dish 是一道菜：菜名 + 做法/分量明细。
+// Dish 是一道菜：菜名 + 做法/分量明细 + 可选的菜级食用反馈。
 type Dish struct {
-	Name   string `json:"name"`
-	Detail string `json:"detail"`
+	Name     string    `json:"name"`
+	Detail   string    `json:"detail"`
+	Feedback *Feedback `json:"feedback,omitempty"` // nil=还没反馈（omitempty 兼容旧数据）
 }
 
 // LoadHistory 读 history.json 反序列化成 []Day。

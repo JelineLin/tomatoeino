@@ -20,8 +20,8 @@ private struct YearMonth: Hashable, Comparable {
 
 struct CalendarHistoryView: View {
     let days: [Day]
-    // 记反馈的回调：(date, field, rating, note)。由 HistoryView 注入（转调 VM）。
-    var onFeedback: (_ date: String, _ field: String, _ rating: String, _ note: String) -> Void = { _, _, _, _ in }
+    // 记反馈的回调：(date, field, dish, rating, note)。由 HistoryView 注入（转调 VM）。
+    var onFeedback: (_ date: String, _ field: String, _ dish: String, _ rating: String, _ note: String) -> Void = { _, _, _, _, _ in }
 
     // 当前展示的月份；nil 表示还没初始化（首次出现时跳到最近有记录的月份）。
     @State private var current: YearMonth?
@@ -159,14 +159,14 @@ struct CalendarHistoryView: View {
                     }
                 }
                 VStack(alignment: .leading, spacing: 12) {
-                    MealRowView(label: "午餐", meal: day.lunch, date: dateStr, field: "lunch") { r, n in
-                        onFeedback(dateStr, "lunch", r, n)
+                    MealRowView(label: "午餐", meal: day.lunch, date: dateStr, field: "lunch") { d, r, n in
+                        onFeedback(dateStr, "lunch", d, r, n)
                     }
-                    MealRowView(label: "水果", meal: day.fruit, date: dateStr, field: "fruit") { r, n in
-                        onFeedback(dateStr, "fruit", r, n)
+                    MealRowView(label: "水果", meal: day.fruit, date: dateStr, field: "fruit") { d, r, n in
+                        onFeedback(dateStr, "fruit", d, r, n)
                     }
-                    MealRowView(label: "晚餐", meal: day.dinner, date: dateStr, field: "dinner") { r, n in
-                        onFeedback(dateStr, "dinner", r, n)
+                    MealRowView(label: "晚餐", meal: day.dinner, date: dateStr, field: "dinner") { d, r, n in
+                        onFeedback(dateStr, "dinner", d, r, n)
                     }
                 }
                 .padding()
@@ -199,18 +199,26 @@ struct CalendarHistoryView: View {
     }
 }
 
-// 一餐的渲染：图标 + 标签 + 时间徽章 + 菜品清单 + 反馈。列表和日历两个视图共用，样式一致。
+// 一餐的渲染：图标 + 标签 + 时间徽章 + 菜品清单。列表和日历两个视图共用，样式一致。
 //
-// 反馈可选：只有传了 date/field/onFeedback（列表和日历都传）才显示反馈徽章 + 「加/改反馈」按钮，
-// 点开在 sheet 里选 爱吃/一般/不爱吃 + 可选备注。BriefView 等只读场景不传，就退化成纯展示。
+// 反馈是【菜级粒度】：每道菜一行，行尾是这道菜自己的反馈徽章/「＋反馈」按钮——
+// 一餐里粥爱吃、青菜不爱吃是常态，整餐一刀切分不清功过。只有传了 date/field/onFeedback
+//（列表和日历都传）才可交互；BriefView/导入预览等只读场景不传，退化成纯展示。
+// 旧数据的餐级反馈（meal.feedback）保留成只读小徽章，不再提供编辑入口。
 struct MealRowView: View {
     let label: String
     let meal: Meal?
     var date: String? = nil
     var field: String? = nil                              // lunch/fruit/dinner
-    var onFeedback: ((_ rating: String, _ note: String) -> Void)? = nil
+    var onFeedback: ((_ dish: String, _ rating: String, _ note: String) -> Void)? = nil
 
-    @State private var showEditor = false
+    // 正在编辑反馈的那道菜。sheet(item:) 需要 Identifiable——同一餐里菜名唯一（后端按名定位）。
+    private struct EditingDish: Identifiable {
+        let name: String
+        let current: Feedback?
+        var id: String { name }
+    }
+    @State private var editingDish: EditingDish?
 
     // 每餐一个专属图标和颜色：午餐日头橙、水果叶子绿、晚餐月亮蓝紫——扫一眼就分清。
     private var style: (icon: String, color: Color) {
@@ -245,52 +253,68 @@ struct MealRowView: View {
                                 .padding(.vertical, 2)
                                 .background(Capsule().fill(Color.primary.opacity(0.06)))
                         }
-                    }
-                    ForEach(meal.dishes, id: \.self) { dish in
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(dish.name).font(.callout)
-                            if !dish.detail.isEmpty {
-                                Text(dish.detail)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
+                        // 旧数据的餐级反馈：只读小徽章，标明是「整餐」口径。
+                        if let fb = meal.feedback {
+                            Text("整餐 \(fb.emoji)\(fb.ratingLabel)")
+                                .font(.caption2)
+                                .foregroundStyle(fb.tint)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Capsule().fill(fb.tint.opacity(0.12)))
                         }
                     }
-                    if canFeedback {
-                        feedbackRow(meal)
+                    ForEach(meal.dishes, id: \.self) { dish in
+                        dishRow(dish)
                     }
                 }
             }
             .padding(.vertical, 2)
-            .sheet(isPresented: $showEditor) {
-                FeedbackEditorSheet(current: meal.feedback) { rating, note in
-                    onFeedback?(rating, note)
+            .sheet(item: $editingDish) { target in
+                FeedbackEditorSheet(dishName: target.name, current: target.current) { rating, note in
+                    onFeedback?(target.name, rating, note)
                 }
             }
         }
     }
 
-    // 反馈行：已有反馈显示彩色徽章；右侧「加反馈/改」按钮打开编辑 sheet。
-    private func feedbackRow(_ meal: Meal) -> some View {
-        HStack(spacing: 8) {
-            if let fb = meal.feedback {
+    // 一道菜一行：名字/明细在左，这道菜自己的反馈在右。
+    private func dishRow(_ dish: Dish) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(dish.name).font(.callout)
+                if !dish.detail.isEmpty {
+                    Text(dish.detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if canFeedback {
+                Spacer(minLength: 8)
+                Button {
+                    editingDish = EditingDish(name: dish.name, current: dish.feedback)
+                } label: {
+                    if let fb = dish.feedback {
+                        Text(fb.badgeText)
+                            .font(.caption)
+                            .foregroundStyle(fb.tint)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(Capsule().fill(fb.tint.opacity(0.15)))
+                    } else {
+                        Label("反馈", systemImage: "face.smiling")
+                            .font(.caption)
+                            .foregroundStyle(.tint)
+                    }
+                }
+                .buttonStyle(.plain)
+            } else if let fb = dish.feedback {
+                // 只读场景（导入预览等）：有反馈照样展示，只是不可点。
+                Spacer(minLength: 8)
                 Text(fb.badgeText)
                     .font(.caption)
                     .foregroundStyle(fb.tint)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(Capsule().fill(fb.tint.opacity(0.15)))
             }
-            Button {
-                showEditor = true
-            } label: {
-                Label(meal.feedback == nil ? "加反馈" : "改", systemImage: "face.smiling")
-                    .font(.caption)
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.tint)
         }
-        .padding(.top, 3)
     }
 }
 
@@ -307,7 +331,9 @@ extension Feedback {
 }
 
 // 反馈编辑 sheet：选 爱吃/一般/不爱吃 + 可选备注。已有反馈时多一个「清除」。
+// 标题带菜名——反馈是菜级的，编辑时明确「在评价哪道菜」。
 private struct FeedbackEditorSheet: View {
+    let dishName: String
     let current: Feedback?
     let onSave: (_ rating: String, _ note: String) -> Void
 
@@ -315,7 +341,8 @@ private struct FeedbackEditorSheet: View {
     @State private var rating: String
     @State private var note: String
 
-    init(current: Feedback?, onSave: @escaping (String, String) -> Void) {
+    init(dishName: String, current: Feedback?, onSave: @escaping (String, String) -> Void) {
+        self.dishName = dishName
         self.current = current
         self.onSave = onSave
         _rating = State(initialValue: current?.rating ?? "like")
@@ -325,7 +352,7 @@ private struct FeedbackEditorSheet: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("宝宝爱吃吗") {
+                Section("宝宝爱吃「\(dishName)」吗") {
                     Picker("反馈", selection: $rating) {
                         Text("👍 爱吃").tag("like")
                         Text("😐 一般").tag("ok")
@@ -346,7 +373,7 @@ private struct FeedbackEditorSheet: View {
                     }
                 }
             }
-            .navigationTitle("食用反馈")
+            .navigationTitle(dishName)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {

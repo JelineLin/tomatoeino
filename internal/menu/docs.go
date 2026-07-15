@@ -84,11 +84,15 @@ func renderMeal(date, label string, m *Meal) string {
 
 	parts := make([]string, 0, len(m.Dishes))
 	for _, dish := range m.Dishes {
+		p := dish.Name
 		if dish.Detail != "" {
-			parts = append(parts, fmt.Sprintf("%s（%s）", dish.Name, dish.Detail))
-		} else {
-			parts = append(parts, dish.Name)
+			p = fmt.Sprintf("%s（%s）", dish.Name, dish.Detail)
 		}
+		// 菜级反馈跟在这道菜后面：〔宝宝爱吃〕——比餐级尾巴更精确地告诉模型功过在哪道菜。
+		if dish.Feedback != nil {
+			p += dishFeedbackTag(dish.Feedback)
+		}
+		parts = append(parts, p)
 	}
 	b.WriteString(strings.Join(parts, "；"))
 	// 反馈拼在餐后：既进向量 Content（检索时召回带反馈），也进 recent_meals/find_by_ingredient
@@ -100,16 +104,30 @@ func renderMeal(date, label string, m *Meal) string {
 }
 
 // renderFeedback 把一餐的反馈渲染成一句跟在餐后的人话，如「｜反馈：宝宝不爱吃（只吃了几口）」。
+// （餐级反馈是旧数据的遗留形态，渲染保留；新反馈都在菜级，见 dishFeedbackTag。）
 func renderFeedback(fb *Feedback) string {
-	label := map[string]string{"like": "爱吃", "dislike": "不爱吃", "ok": "一般"}[fb.Rating]
-	if label == "" {
-		label = fb.Rating // 未知取值兜底原样输出，不静默吞掉
-	}
-	s := "｜反馈：宝宝" + label
+	s := "｜反馈：宝宝" + feedbackLabel(fb.Rating)
 	if fb.Note != "" {
 		s += "（" + fb.Note + "）"
 	}
 	return s
+}
+
+// dishFeedbackTag 把一道菜的反馈渲染成紧跟菜名的短标注，如「〔宝宝不爱吃：只吃了几口〕」。
+func dishFeedbackTag(fb *Feedback) string {
+	s := "〔宝宝" + feedbackLabel(fb.Rating)
+	if fb.Note != "" {
+		s += "：" + fb.Note
+	}
+	return s + "〕"
+}
+
+// feedbackLabel 把 rating 翻成人话；未知取值兜底原样输出，不静默吞掉。
+func feedbackLabel(rating string) string {
+	if l := map[string]string{"like": "爱吃", "dislike": "不爱吃", "ok": "一般"}[rating]; l != "" {
+		return l
+	}
+	return rating
 }
 
 // BuildMealDocument 把「一餐」变成一条可入库的 Document。

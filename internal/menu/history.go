@@ -103,6 +103,11 @@ func (s *HistoryStore) setMealLocked(date, mealField string, m Meal) (stored *Me
 		if old != nil && old.Feedback != nil && m.Feedback == nil {
 			m.Feedback = old.Feedback
 		}
+		// 菜级反馈同理按菜名结转：覆盖修正（改分量/补菜）不该抹掉某道菜已录的反馈。
+		// 先克隆切片再写——传入的 m.Dishes 底层数组归调用方所有，不能原地改。
+		if old != nil {
+			m.Dishes = carryDishFeedback(old.Dishes, m.Dishes)
+		}
 		s.days[idx].setMeal(mealField, &m) // 换指针，不原地改旧 Meal——旧快照仍一致
 	} else {
 		var d Day
@@ -113,6 +118,25 @@ func (s *HistoryStore) setMealLocked(date, mealField string, m Meal) (stored *Me
 		sort.Slice(s.days, func(i, j int) bool { return s.days[i].Date < s.days[j].Date })
 	}
 	return &m, replaced
+}
+
+// carryDishFeedback 把旧餐里各道菜的反馈按【菜名精确匹配】结转到新菜单上
+//（新菜自带反馈的以新为准）。返回的是新切片——绝不改传入两个切片的元素。
+func carryDishFeedback(old, next []Dish) []Dish {
+	byName := map[string]*Feedback{}
+	for _, d := range old {
+		if d.Feedback != nil {
+			byName[d.Name] = d.Feedback
+		}
+	}
+	out := make([]Dish, len(next))
+	copy(out, next)
+	for i := range out {
+		if out[i].Feedback == nil {
+			out[i].Feedback = byName[out[i].Name]
+		}
+	}
+	return out
 }
 
 // WrittenMeal 记录 ImportDays 真正写入的一餐，供上层重建向量 doc（Upsert）。
@@ -216,6 +240,67 @@ func (s *HistoryStore) SetFeedback(date, mealField string, fb *Feedback) (*Meal,
 
 	clone := *old       // 浅拷贝：Dishes 切片共享（只读、不改内容），安全
 	clone.Feedback = fb // 只在副本上写反馈
+	s.days[idx].setMeal(mealField, &clone)
+
+	if err := s.save(); err != nil {
+		return nil, err
+	}
+	return &clone, nil
+}
+
+// SetDishFeedback 给 date 那天 mealField 里的某一道菜记反馈（fb 传 nil 表示清除）。
+// 菜按【菜名精确匹配】定位；找不到时把这餐的菜名列出来报错，前端/模型能照着改。
+// 返回更新后的整餐，供上层重建向量 doc（Upsert）。
+//
+// 快照不变量升级版：菜级写入会改到 Dish 元素，所以除了克隆 Meal 本体，
+// 还必须【克隆 Dishes 切片】再写——老切片被旧快照共享着，原地改会写脏读者。
+func (s *HistoryStore) SetDishFeedback(date, mealField, dishName string, fb *Feedback) (*Meal, error) {
+	if !validMealField(mealField) {
+		return nil, fmt.Errorf("餐别必须是 lunch/fruit/dinner 之一，收到 %q", mealField)
+	}
+	dishName = strings.TrimSpace(dishName)
+	if dishName == "" {
+		return nil, fmt.Errorf("菜名不能为空")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	idx := -1
+	for i := range s.days {
+		if s.days[i].Date == date {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return nil, fmt.Errorf("%s 没有记录，无法加反馈", date)
+	}
+	old := s.days[idx].mealOf(mealField)
+	if old == nil {
+		return nil, fmt.Errorf("%s 的%s没有记录，无法加反馈", date, mealLabelOf(mealField))
+	}
+
+	clone := *old
+	clone.Dishes = make([]Dish, len(old.Dishes))
+	copy(clone.Dishes, old.Dishes)
+
+	hit := -1
+	for i := range clone.Dishes {
+		if clone.Dishes[i].Name == dishName {
+			hit = i
+			break
+		}
+	}
+	if hit < 0 {
+		names := make([]string, 0, len(clone.Dishes))
+		for _, d := range clone.Dishes {
+			names = append(names, d.Name)
+		}
+		return nil, fmt.Errorf("%s 的%s里没有「%s」这道菜（有：%s）",
+			date, mealLabelOf(mealField), dishName, strings.Join(names, "、"))
+	}
+	clone.Dishes[hit].Feedback = fb
 	s.days[idx].setMeal(mealField, &clone)
 
 	if err := s.save(); err != nil {

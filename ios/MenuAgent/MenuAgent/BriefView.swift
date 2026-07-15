@@ -4,6 +4,7 @@
 // 这个 tab 打开就能看——agent 主动干活，人只负责看结果。
 // 还没有简报（后端刚启动、没到点）时给一个「立即生成」按钮走 ?refresh=1 现做。
 import SwiftUI
+import UIKit // UIPasteboard：推荐菜单一键复制
 
 @MainActor
 final class BriefViewModel: ObservableObject {
@@ -69,6 +70,7 @@ final class BriefViewModel: ObservableObject {
 struct BriefView: View {
     @StateObject private var vm = BriefViewModel()
     @State private var editing: EditingTarget?   // 正在编辑的那一餐（打开编辑 sheet）
+    @State private var copiedMenu = false        // 复制回执：按钮短暂变「已复制」
 
     var body: some View {
         NavigationStack {
@@ -151,12 +153,44 @@ struct BriefView: View {
 
     private func menuSection(_ menu: RecommendedMenu) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("今日推荐 · 可编辑后采纳")
-                .font(.headline)
+            HStack {
+                Text("今日推荐 · 可编辑后采纳")
+                    .font(.headline)
+                Spacer()
+                // 一键复制整份推荐：发家庭群/贴备忘录。按钮短暂变「已复制」作为回执。
+                Button {
+                    UIPasteboard.general.string = menuCopyText(menu)
+                    withAnimation { copiedMenu = true }
+                    Task {
+                        try? await Task.sleep(nanoseconds: 1_500_000_000)
+                        withAnimation { copiedMenu = false }
+                    }
+                } label: {
+                    Label(copiedMenu ? "已复制" : "复制", systemImage: copiedMenu ? "checkmark" : "doc.on.doc")
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+                .disabled(copiedMenu)
+            }
             ForEach(menu.meals) { meal in
                 mealCard(date: menu.date, meal: meal)
             }
         }
+    }
+
+    // menuCopyText 把结构化推荐排成一段可粘贴的纯文本：日期 + 每餐（时间）+ 菜品明细。
+    // 理由不带——复制是给「照着做/发给家人」用的，要的是清单不是论证。
+    private func menuCopyText(_ menu: RecommendedMenu) -> String {
+        var lines = ["\(menu.date) 推荐菜单"]
+        for meal in menu.meals {
+            var head = "\(mealIcon(meal.meal)) \(mealLabel(meal.meal))"
+            if !meal.time.isEmpty { head += "（\(meal.time)）" }
+            lines.append(head)
+            for dish in meal.dishes {
+                lines.append(dish.detail.isEmpty ? "- \(dish.name)" : "- \(dish.name)：\(dish.detail)")
+            }
+        }
+        return lines.joined(separator: "\n")
     }
 
     private func mealCard(date: String, meal: ProposedMeal) -> some View {

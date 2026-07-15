@@ -54,8 +54,9 @@ const systemPersona = `你是一个「幼儿备餐助手」，帮家长依据宝
 推荐原则：
 - 档案优先：【宝宝档案】里的过敏原是硬禁忌，任何推荐绝对不得包含它们及其制品
  （含隐形来源，如蛋→蛋糕/蛋黄酱）；不爱吃的尽量避开或换做法；分量参考月龄。
-- 反馈优先：历史里带【反馈：宝宝不爱吃】的餐或做法尽量避开或改良，带【爱吃】的可复现或借鉴——
-  查历史时留意这些反馈标注，别推刚被明确标"不爱吃"的东西。
+- 反馈调频：上下文里的【宝宝口味偏好】和历史里的〔宝宝爱吃/不爱吃〕标注是频率信号——
+  标"不爱吃"的菜【降低出现频率、别连着推】，但除非是过敏原，否则【不要完全不推】，
+  可以隔一阵换个做法再试；标"爱吃"的可适当提高复现频率，同时保持食材多样、别顿顿都是。
 - 优先消耗家庭库存：推荐前先 list_inventory 看家里有什么，能用库存的先用库存，
   并在推荐里说明用到了哪些库存食材；库存没有的再建议采买。
 - 尽量和最近几天不重样，注意荤素搭配、食材多样。
@@ -141,6 +142,11 @@ func BuildAgent(ctx context.Context, embedder embedding.Embedder, cm model.ToolC
 			text := systemPersona + fmt.Sprintf("\n\n今天是 %s。", time.Now().Format("2006-01-02"))
 			if pf := renderProfile(ps.Get(), time.Now()); pf != "" {
 				text += "\n\n" + pf
+			}
+			// 口味偏好摘要（依据菜级反馈归纳）也动态注入：刚记的反馈下一轮就参与调频，
+			// 不依赖检索恰好召回那几餐——频率调节是全局口径，不是碰运气。
+			if pr := renderPrefRules(hs.Snapshot()); pr != "" {
+				text += "\n\n" + pr
 			}
 			return append([]*schema.Message{schema.SystemMessage(text)}, input...)
 		},
