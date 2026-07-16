@@ -32,6 +32,10 @@ type ProposedMeal struct {
 	Time   string `json:"time"`   // 建议用餐时间，可空串
 	Dishes []Dish `json:"dishes"` // 复用历史的 Dish{Name,Detail}
 	Reason string `json:"reason"` // 这餐这样搭配的简短理由，可空串
+	// Applied：这餐已被家长（可能编辑后）采纳入库。propose_menu 登记时恒为 false，
+	// 采纳成功后由 HTTP 层回写简报缓存（连同编辑后的菜品）——重进 App 拉到的简报
+	// 才能既显示家长实际采纳的版本、又保住「已采纳」徽章，编辑不丢。
+	Applied bool `json:"applied,omitempty"`
 }
 
 // MenuSink 是请求级的结构化菜单收集器。带锁纯属防御——一次生成里 agent 理论上

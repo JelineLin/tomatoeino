@@ -84,7 +84,9 @@ struct PrefRule: Codable, Identifiable {
 struct DailyBrief: Codable {
     let date: String        // 简报对应的日期 yyyy-MM-dd
     let content: String
-    let menu: RecommendedMenu?  // agent 经 propose_menu 登记的结构化推荐（可能 nil，只显示文字）
+    // menu 是 var：采纳成功后要把「家长编辑过的版本」写回卡片（后端简报缓存也同步回写了，
+    // 两边一致）；不然卡片一直显示原推荐，编辑像是没保存。
+    var menu: RecommendedMenu?  // agent 经 propose_menu 登记的结构化推荐（可能 nil，只显示文字）
     let generatedAt: Date   // 生成时刻（后端 RFC3339，需 ISO8601 解码策略）
 }
 
@@ -100,6 +102,9 @@ struct ProposedMeal: Codable, Identifiable {
     var time: String
     var dishes: [EditDish]
     var reason: String
+    // 后端回写的「已采纳」标记（采纳成功后简报缓存里就带上）——重进 App 拉简报，
+    // 已采纳的餐直接恢复徽章和编辑后的菜品，不再回到原推荐。旧后端缺字段 → nil。
+    var applied: Bool? = nil
 
     var id: String { meal }
 }

@@ -73,6 +73,35 @@ func (b *briefStore) set(d *dailyBrief) {
 	b.brief = d
 }
 
+// markApplied 把「家长（可能编辑后）采纳了某餐」回写进简报缓存：换上采纳时真正入库的
+// 时间/菜品，并标 Applied——重新拉简报时卡片显示的就是实际采纳的版本，而不是原推荐
+//（否则家长编辑完看到卡片没变，以为「编辑没保存」；重进 App 连已采纳状态都丢）。
+//
+// 克隆换指针，不原地改：get() 交出去的指针可能正被 handleBrief 在锁外序列化，
+// 原地改会数据竞争（和 HistoryStore 的快照纪律同一口径）。
+// 日期对不上（简报是昨天的、采纳的是明天的餐）就不动——简报只描述它自己那天。
+func (b *briefStore) markApplied(date, mealField string, stored *menu.Meal) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.brief == nil || b.brief.Menu == nil || b.brief.Menu.Date != date {
+		return
+	}
+	old := b.brief.Menu
+	nm := &menu.RecommendedMenu{Date: old.Date, Meals: make([]menu.ProposedMeal, len(old.Meals))}
+	copy(nm.Meals, old.Meals)
+	for i := range nm.Meals {
+		if nm.Meals[i].Meal != mealField {
+			continue
+		}
+		nm.Meals[i].Time = stored.Time
+		nm.Meals[i].Dishes = stored.Dishes
+		nm.Meals[i].Applied = true
+	}
+	nb := *b.brief
+	nb.Menu = nm
+	b.brief = &nb
+}
+
 // generateBrief 跑一次 agent 生成简报并落库（多用户后按 workspace 生成）。
 // 定时器和 ?refresh=1 共用这一条路。用 Generate（非流式）：没有客户端在等打字机。
 func generateBrief(ctx context.Context, uid string, ws *workspace) (*dailyBrief, error) {

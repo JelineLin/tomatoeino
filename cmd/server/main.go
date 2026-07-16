@@ -329,6 +329,8 @@ func (s *server) handleApplyMeal(w http.ResponseWriter, r *http.Request) {
 	if err := ws.store.Upsert(r.Context(), []*schema.Document{menu.BuildMealDocument(date, req.Meal, stored)}); err != nil {
 		log.Printf("/api/history/apply 向量更新失败（重启自愈）: %v", err)
 	}
+	// ③ 简报缓存回写：卡片换成实际采纳的版本并标 Applied——家长的编辑不再「看起来没保存」。
+	ws.briefs.markApplied(date, req.Meal, stored)
 
 	// 回整份历史，前端直接刷新历史 tab。
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")

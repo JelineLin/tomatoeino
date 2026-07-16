@@ -25,7 +25,7 @@ final class BriefViewModel: ObservableObject {
         errorText = nil
         do {
             brief = try await api.fetchBrief()
-            appliedMeals = []  // 换了一份简报，采纳状态重置
+            restoreAppliedState()
         } catch {
             errorText = error.localizedDescription
         }
@@ -39,20 +39,34 @@ final class BriefViewModel: ObservableObject {
         errorText = nil
         do {
             brief = try await api.fetchBrief(refresh: true)
-            appliedMeals = []
+            restoreAppliedState()
         } catch {
             errorText = error.localizedDescription
         }
         isGenerating = false
     }
 
-    // applyMeal 采纳（家长编辑后的）某一餐入库。成功后标记该餐为「已采纳」。
+    // 换了一份简报后，从后端回写的 applied 标记恢复采纳状态——
+    // 已采纳的餐（含编辑后的菜品）由服务端简报缓存带回来，重进 App 不丢。
+    private func restoreAppliedState() {
+        appliedMeals = Set(brief?.menu?.meals.filter { $0.applied == true }.map(\.meal) ?? [])
+    }
+
+    // applyMeal 采纳（家长编辑后的）某一餐入库。成功后标记「已采纳」，并把
+    // 编辑后的时间/菜品写回本地卡片——卡片显示的必须是实际采纳的版本，
+    // 否则家长编辑完看到原推荐纹丝不动，以为没保存（后端简报缓存同步做了回写）。
     // 失败走 applyError（弹 alert），不碰简报显示。
     func applyMeal(date: String, field: String, time: String, dishes: [EditDish]) async {
         applyError = nil
         do {
             _ = try await api.applyMeal(date: date, meal: field, time: time, dishes: dishes)
             appliedMeals.insert(field)
+            if var menu = brief?.menu, let i = menu.meals.firstIndex(where: { $0.meal == field }) {
+                menu.meals[i].time = time
+                menu.meals[i].dishes = dishes
+                menu.meals[i].applied = true
+                brief?.menu = menu
+            }
         } catch {
             applyError = error.localizedDescription
         }
