@@ -20,15 +20,8 @@
 	<string>1</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
-	<!-- ATS：暂用【明文 HTTP】（等 jelinelin.com 阿里云接入备案下来再回 HTTPS）——
-	     必须放行明文，否则 Apple 默认策略会拦掉所有 http:// 请求。
-	     ⚠️ token 明文传输，自用/亲友可接受。备案后回 https://jelinelin.com 时，
-	     把下面这段 NSAppTransportSecurity 整块删掉即可（恢复最严格默认）。 -->
-	<key>NSAppTransportSecurity</key>
-	<dict>
-		<key>NSAllowsArbitraryLoads</key>
-		<true/>
-	</dict>
+	<!-- ATS：走 Apple 最严格默认（全 HTTPS）。2026-07-16 jelinelin.com 接入备案
+	     批复生效，后端已回 443 + DigiCert 证书，不再需要任何明文/自签豁免。 -->
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UISupportedInterfaceOrientations</key>

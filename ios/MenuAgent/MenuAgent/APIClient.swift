@@ -6,13 +6,11 @@
 import Foundation
 
 struct APIClient {
-    // 后端地址：默认连云端 hermas，暂用【明文 HTTP + Bearer】——回到最初能用的方案。
-    // 为什么退回明文：jelinelin.com 的阿里云「接入备案」没批下来之前，域名/443/HTTPS
-    // 都被阿里云边缘掐 SNI 走不通；IP+自签又得给每台设备做 CA pinning，麻烦。明文最省事。
-    // ⚠️ token 走明文传输（自用/亲友可接受）。备案下来后回到 TLS：baseURL 换成
-    // https://jelinelin.com、服务端 .env 配 DigiCert 证书、这段注释和 scheme 一起改回。
-    var baseURL = URL(string: "http://101.132.191.7:8080")!
-    // var baseURL = URL(string: "http://127.0.0.1:8080")!  // ← 本地调试用
+    // 后端地址：HTTPS + 域名 + DigiCert 正证书（系统信任链，无需任何 pinning/描述文件）。
+    // 2026-07-16 jelinelin.com 阿里云接入备案批复，SNI 拦截解除，从明文 HTTP 回到 TLS：
+    // 服务端 443 + certs/jelinelin.com.pem，token 从此不再明文过网。
+    var baseURL = URL(string: "https://jelinelin.com")!
+    // var baseURL = URL(string: "http://127.0.0.1:8080")!  // ← 本地调试用（需临时加回 ATS 豁免）
 
     // apiToken 与后端 .env 里的 API_TOKEN 一致，值放在 Secrets.swift（已 gitignore，
     // 见 Secrets.swift.example）——仓库是公开的，密钥绝不能写进要提交的源码。
