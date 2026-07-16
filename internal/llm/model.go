@@ -179,29 +179,38 @@ func NewEmbedder(ctx context.Context) (embedding.Embedder, error) {
 		modelName = "text-embedding-3-small" // 便宜、够用的小向量模型
 	}
 
+	// 组装底层 embedder（三种形态之一），最后统一包磁盘缓存。
+	var inner embedding.Embedder
+
 	// 方舟 vision 向量走的不是标准 OpenAI 协议（端点 /embeddings/multimodal、入参是多模态片段、
 	// 出参是单条），eino 自带 embedder 接不了。OPENAI_EMBEDDING_MULTIMODAL=true 时改用我们
 	// 自己的适配器（见 ark_embedding.go），它一样实现 embedding.Embedder，上层无感知。
 	if multimodalEnabled() {
-		return newArkMultiModalEmbedder(apiKey, baseURL, modelName), nil
+		inner = newArkMultiModalEmbedder(apiKey, baseURL, modelName)
+	} else {
+		emb, err := embeddingopenai.NewEmbedder(ctx, &embeddingopenai.EmbeddingConfig{
+			APIKey:  apiKey,
+			BaseURL: baseURL,
+			Model:   modelName,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("创建 Embedder 失败: %w", err)
+		}
+		inner = emb
+		// 有些 provider（如豆包/火山方舟的 embedding 接入点）单次只接受一条文本、不支持
+		// 「一次一批」。设 OPENAI_EMBEDDING_BATCH=false 时，包一层适配器把批量拆成逐条调用——
+		// 上层 vectorstore.Store 仍按「一次传一批」写，完全不用改。这就是面向接口的回报。
+		if !batchEnabled() {
+			inner = &perTextEmbedder{inner: emb}
+		}
 	}
 
-	emb, err := embeddingopenai.NewEmbedder(ctx, &embeddingopenai.EmbeddingConfig{
-		APIKey:  apiKey,
-		BaseURL: baseURL,
-		Model:   modelName,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("创建 Embedder 失败: %w", err)
+	// 最外层包磁盘缓存（见 embed_cache.go）：同样的文本不再重复调 API，重启装载毫秒级。
+	// 包在最外层，缓存命中时连「逐条拆批」那层都不会走到。OPENAI_EMBEDDING_CACHE=false 可关。
+	if dir := embeddingCacheDir(); dir != "" {
+		return newCachingEmbedder(inner, dir, modelName), nil
 	}
-
-	// 有些 provider（如豆包/火山方舟的 embedding 接入点）单次只接受一条文本、不支持
-	// 「一次一批」。设 OPENAI_EMBEDDING_BATCH=false 时，包一层适配器把批量拆成逐条调用——
-	// 上层 vectorstore.Store 仍按「一次传一批」写，完全不用改。这就是面向接口的回报。
-	if !batchEnabled() {
-		return &perTextEmbedder{inner: emb}, nil
-	}
-	return emb, nil
+	return inner, nil
 }
 
 // batchEnabled 读 OPENAI_EMBEDDING_BATCH，默认 true（按支持批量处理，如 OpenAI）。

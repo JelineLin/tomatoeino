@@ -49,6 +49,7 @@ In VS Code, use the "Debug 01_chatmodel" or "Debug current package" launch confi
   - `OPENAI_EMBEDDING_BASE_URL` — embedding 专用网关；未设置则回退到 `OPENAI_BASE_URL`
   - `OPENAI_EMBEDDING_MODEL` — embedding 模型名 / 接入点 ID，默认 `text-embedding-3-small`
   - `OPENAI_EMBEDDING_BATCH` — 设为 `false`/`0`/`off` 可关闭批量 embedding（豆包等只收单条的接入点需要）。默认 `true`。关闭时 `NewEmbedder` 自动包一层 `perTextEmbedder` 适配器把批量拆成逐条，上层 `Store` 不用改。
+  - `OPENAI_EMBEDDING_CACHE` / `OPENAI_EMBEDDING_CACHE_DIR` — embedding 磁盘缓存（`internal/llm/embed_cache.go`），默认开、目录 `data/vector-cache`。按 sha256(模型名+文本) 内容寻址、一条向量一个 JSON 文件：同样的文本不重复调 API，重启重建向量库时全命中、毫秒装载；换模型自动整体失效。缓存是可丢弃的派生数据，权威永远是 history.json 原文。设 `false` 关闭。
 
   **Provider compatibility:** The code uses OpenAI-compatible endpoints throughout (no OpenAI-specific SDKs or features). Any provider that speaks the `/v1/chat/completions` and `/v1/embeddings` protocols works — just swap `OPENAI_BASE_URL`. The `.env.example` includes a full 火山方舟 (Volcengine Ark / 豆包 Doubao) config example. Key caveat: chat and embedding are separate services even on the same provider, each with its own endpoint/model/billing — mixing their credentials produces empty vectors or 404s.
 
