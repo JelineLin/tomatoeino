@@ -1,0 +1,16 @@
+@import "tailwindcss";
+
+/* 移动端手感的小修补：
+   - 100dvh 让整屏跟着浏览器工具栏伸缩，键盘/工具栏变化不留怪缝；
+   - 关掉 iOS Safari 的点击灰色高亮，按压反馈交给 active: 样式；
+   - 中文站直接用系统字体栈（PingFang/HarmonyOS Sans…），不联网拉字体。 */
+html,
+body {
+  height: 100dvh;
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei", "Segoe UI", sans-serif;
+}

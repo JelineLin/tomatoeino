@@ -17,9 +17,10 @@
 BINARY   := dist/server-linux-amd64
 HOST     := hermas
 REMOTE   := /opt/menuagent/server
-HEALTH   := http://101.132.191.7:8080/healthz
+# 2026-07-16 起走 TLS+域名（8080 明文口已封），healthz 也从这里探。
+HEALTH   := https://jelinelin.com/healthz
 
-.PHONY: build test vet linux release deploy clean
+.PHONY: build test vet linux release deploy web deploy-web clean
 
 build:
 	go build ./...
@@ -74,6 +75,22 @@ deploy: linux
 		curl -sf -m 3 $(HEALTH) >/dev/null && { echo "✅ 部署完成，healthz ok"; exit 0; }; \
 		sleep 1; \
 	done; echo "❌ healthz 超时，去查 journalctl -u menuagent"; exit 1
+
+# 构建网页版（Next.js 静态导出 → web/out，由 Go 服务的 spaHandler 托管）。
+# node_modules 不在就先 npm ci（新机器/CI 一条命令跑通）。
+web:
+	@test -d web/node_modules || (cd web && npm ci)
+	cd web && npm run build
+	@du -sh web/out | awk '{print "  built: web/out", $$1}'
+
+# 部署网页版：纯静态文件 rsync 到服务器，Go 进程【不用重启】——
+# spaHandler 每个请求现读磁盘，文件换了下一个请求就是新页面。
+deploy-web: web
+	rsync -az --delete --timeout=60 -e "ssh -o ServerAliveInterval=10 -o ServerAliveCountMax=3" \
+		web/out/ $(HOST):/opt/menuagent/web/out/
+	@curl -sf -m 8 https://jelinelin.com/ | head -c 60 >/dev/null \
+		&& echo "✅ 网页版已部署：https://jelinelin.com" \
+		|| { echo "❌ 首页拉不到，去服务器看看"; exit 1; }
 
 clean:
 	rm -rf dist

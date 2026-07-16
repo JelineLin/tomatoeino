@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -123,6 +124,14 @@ func main() {
 	mux.HandleFunc("/api/inventory/parse-image", srv.handleParseOrderImage)
 	mux.HandleFunc("/api/profile", srv.handleProfile)
 	mux.HandleFunc("/api/chat", srv.handleChat)
+
+	// 网页版（Next.js 静态导出产物）：目录存在就托管在 "/"。
+	// 和 API 同域名同端口——浏览器同源直调 /api/*，CORS/额外端口/反向代理都不需要。
+	// 页面本身是公开外壳，数据全在 Bearer 保护的 /api/* 后面（withAuth 只拦 /api/*）。
+	if webDir := envOr("WEB_DIR", filepath.Join("web", "out")); dirExists(webDir) {
+		mux.Handle("/", spaHandler(webDir))
+		log.Printf("🌐 网页版已托管：%s", webDir)
+	}
 
 	httpServer := &http.Server{
 		Addr:    ":" + envOr("PORT", "8080"),
@@ -1185,4 +1194,32 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// dirExists 判断路径存在且是目录（网页版托管开关：目录在就开）。
+func dirExists(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && fi.IsDir()
+}
+
+// spaHandler 托管 Next.js 静态导出的网页目录：
+//   - 请求的文件/目录（含 index.html）存在 → 交给 FileServer 照常伺服；
+//   - 不存在（前端客户端路由的深链，如刷新时的 /history）→ 回退根 index.html，
+//     由前端路由接管。API 永远不会走到这里（mux 上 /api/* 前缀更长、优先匹配）。
+func spaHandler(dir string) http.Handler {
+	fs := http.FileServer(http.Dir(dir))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := strings.TrimPrefix(r.URL.Path, "/")
+		if p != "" {
+			if _, err := os.Stat(filepath.Join(dir, filepath.FromSlash(p))); err == nil {
+				fs.ServeHTTP(w, r)
+				return
+			}
+			if _, err := os.Stat(filepath.Join(dir, filepath.FromSlash(p), "index.html")); err == nil {
+				fs.ServeHTTP(w, r)
+				return
+			}
+		}
+		http.ServeFile(w, r, filepath.Join(dir, "index.html"))
+	})
 }
