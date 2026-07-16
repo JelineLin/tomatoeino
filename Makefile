@@ -88,9 +88,9 @@ web:
 deploy-web: web
 	rsync -az --delete --timeout=60 -e "ssh -o ServerAliveInterval=10 -o ServerAliveCountMax=3" \
 		web/out/ $(HOST):/opt/menuagent/web/out/
-	@curl -sf -m 8 https://jelinelin.com/ | head -c 60 >/dev/null \
+	@curl -sf -m 8 -o /dev/null https://jelinelin.com/ \
 		&& echo "✅ 网页版已部署：https://jelinelin.com" \
-		|| { echo "❌ 首页拉不到，去服务器看看"; exit 1; }
+		|| { echo "❌ 首页拉不到（HTTP 非 2xx），去服务器看看"; exit 1; }
 
 clean:
 	rm -rf dist

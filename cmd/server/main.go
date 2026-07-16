@@ -125,13 +125,14 @@ func main() {
 	mux.HandleFunc("/api/profile", srv.handleProfile)
 	mux.HandleFunc("/api/chat", srv.handleChat)
 
-	// 网页版（Next.js 静态导出产物）：目录存在就托管在 "/"。
+	// 网页版（Next.js 静态导出产物）：无条件注册，目录在不在【每个请求现查】——
+	// 部署时序因此不敏感（先传二进制重启、后 rsync 静态文件也没事，文件一到下个请求就活）。
 	// 和 API 同域名同端口——浏览器同源直调 /api/*，CORS/额外端口/反向代理都不需要。
 	// 页面本身是公开外壳，数据全在 Bearer 保护的 /api/* 后面（withAuth 只拦 /api/*）。
-	if webDir := envOr("WEB_DIR", filepath.Join("web", "out")); dirExists(webDir) {
-		mux.Handle("/", spaHandler(webDir))
-		log.Printf("🌐 网页版已托管：%s", webDir)
-	}
+	webDir := envOr("WEB_DIR", filepath.Join("web", "out"))
+	mux.Handle("/", spaHandler(webDir))
+	log.Printf("🌐 网页版托管目录：%s（当前%s）", webDir,
+		map[bool]string{true: "已就绪", false: "为空——rsync 静态文件后即生效，无需重启"}[dirExists(webDir)])
 
 	httpServer := &http.Server{
 		Addr:    ":" + envOr("PORT", "8080"),
@@ -1203,12 +1204,17 @@ func dirExists(p string) bool {
 }
 
 // spaHandler 托管 Next.js 静态导出的网页目录：
+//   - 目录本身不存在（还没部署网页）→ 404，等文件到位下个请求自动生效；
 //   - 请求的文件/目录（含 index.html）存在 → 交给 FileServer 照常伺服；
 //   - 不存在（前端客户端路由的深链，如刷新时的 /history）→ 回退根 index.html，
 //     由前端路由接管。API 永远不会走到这里（mux 上 /api/* 前缀更长、优先匹配）。
 func spaHandler(dir string) http.Handler {
 	fs := http.FileServer(http.Dir(dir))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !dirExists(dir) {
+			http.NotFound(w, r)
+			return
+		}
 		p := strings.TrimPrefix(r.URL.Path, "/")
 		if p != "" {
 			if _, err := os.Stat(filepath.Join(dir, filepath.FromSlash(p))); err == nil {
