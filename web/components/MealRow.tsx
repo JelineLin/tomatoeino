@@ -30,11 +30,14 @@ export default function MealRow({
   label,
   meal,
   onFeedback,
+  onEdit,
 }: {
   label: string;
   meal?: Meal | null;
   // 点了某道菜的反馈入口：(菜名, 现有反馈)。不传 = 只读。
   onFeedback?: (dish: string, current: Feedback | null) => void;
+  // 编辑整餐（改时间/菜品）的入口。不传 = 不显示编辑按钮。
+  onEdit?: () => void;
 }) {
   if (!meal || meal.dishes.length === 0) return null;
   const s = STYLE[label] ?? { icon: "🍽", tint: "bg-stone-100" };
@@ -56,6 +59,18 @@ export default function MealRow({
             <span className={`rounded-full px-1.5 py-0.5 text-[11px] ${feedbackTint(meal.feedback)}`}>
               整餐 {feedbackLabel(meal.feedback)}
             </span>
+          )}
+          {onEdit && (
+            <>
+              <span className="flex-1" />
+              <button
+                onClick={onEdit}
+                className="shrink-0 rounded-full px-2 py-0.5 text-xs text-stone-400 active:scale-95"
+                aria-label={`编辑${label}`}
+              >
+                ✎ 改
+              </button>
+            </>
           )}
         </div>
         <div className="mt-1 space-y-1.5">

@@ -144,11 +144,11 @@ struct BriefView: View {
         }
         .refreshable { await vm.load() } // 下拉只拉现成的；重新生成走右上角按钮
         .sheet(item: $editing) { target in
-            MealEditSheet(
-                date: target.date,
-                mealField: target.meal.meal,
-                mealLabel: mealLabel(target.meal.meal),
-                meal: target.meal
+            MealEditorSheet(
+                title: "编辑\(mealLabel(target.meal.meal))",
+                confirmLabel: "采纳",
+                initialTime: target.meal.time,
+                initialDishes: target.meal.dishes
             ) { time, dishes in
                 Task { await vm.applyMeal(date: target.date, field: target.meal.meal, time: time, dishes: dishes) }
             }
@@ -358,72 +358,4 @@ private struct EditingTarget: Identifiable {
     var id: String { meal.meal }
 }
 
-// MealEditSheet：编辑推荐的一餐（时间 + 菜品增删改），点「采纳」写进历史。
-private struct MealEditSheet: View {
-    let date: String
-    let mealField: String
-    let mealLabel: String
-    let onApply: (_ time: String, _ dishes: [EditDish]) -> Void
-
-    @Environment(\.dismiss) private var dismiss
-    @State private var time: String
-    @State private var dishes: [EditDish]
-
-    init(date: String, mealField: String, mealLabel: String, meal: ProposedMeal,
-         onApply: @escaping (String, [EditDish]) -> Void) {
-        self.date = date
-        self.mealField = mealField
-        self.mealLabel = mealLabel
-        self.onApply = onApply
-        _time = State(initialValue: meal.time)
-        _dishes = State(initialValue: meal.dishes)
-    }
-
-    // 去空白、丢掉空菜名的菜品——采纳前清洗一遍。
-    private var cleanedDishes: [EditDish] {
-        dishes
-            .map { EditDish(name: $0.name.trimmingCharacters(in: .whitespacesAndNewlines),
-                            detail: $0.detail.trimmingCharacters(in: .whitespacesAndNewlines)) }
-            .filter { !$0.name.isEmpty }
-    }
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section("时间") {
-                    TextField("如 12:00（可留空）", text: $time)
-                }
-                Section("菜品（可增删改）") {
-                    ForEach($dishes) { $dish in
-                        VStack(alignment: .leading, spacing: 4) {
-                            TextField("菜名", text: $dish.name)
-                            TextField("做法 / 分量（可留空）", text: $dish.detail)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .onDelete { dishes.remove(atOffsets: $0) }
-                    Button {
-                        dishes.append(EditDish(name: "", detail: ""))
-                    } label: {
-                        Label("加一道菜", systemImage: "plus.circle")
-                    }
-                }
-            }
-            .navigationTitle("编辑\(mealLabel)")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("取消") { dismiss() }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("采纳") {
-                        onApply(time.trimmingCharacters(in: .whitespacesAndNewlines), cleanedDishes)
-                        dismiss()
-                    }
-                    .disabled(cleanedDishes.isEmpty)
-                }
-            }
-        }
-    }
-}
+// （编辑弹层已抽成共享的 MealEditorSheet.swift——推荐页「采纳」和历史页「编辑/补记」共用。）

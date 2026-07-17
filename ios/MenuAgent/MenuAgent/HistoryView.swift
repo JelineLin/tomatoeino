@@ -46,6 +46,29 @@ final class HistoryViewModel: ObservableObject {
             }
         }
     }
+
+    // saveMeal 整餐保存（编辑已有 / 补记缺席的一餐），同样串行排队。
+    // 走 /api/history/apply 的整餐覆盖：后端按菜名结转菜级反馈，改做法不丢已记的反馈。
+    func saveMeal(date: String, field: String, time: String, dishes: [EditDish]) {
+        let previous = writeChain
+        writeChain = Task { @MainActor in
+            await previous.value
+            do {
+                self.days = try await self.api.applyMeal(date: date, meal: field, time: time, dishes: dishes).reversed()
+            } catch {
+                self.actionError = error.localizedDescription
+            }
+        }
+    }
+}
+
+// 正在编辑/补记的一餐（打开整餐编辑弹层）。meal 为 nil = 这天该餐还没记录（补记）。
+struct MealEditTarget: Identifiable {
+    let date: String
+    let field: String   // lunch/fruit/dinner
+    let label: String   // 午餐/水果/晚餐
+    let meal: Meal?
+    var id: String { "\(date)-\(field)" }
 }
 
 struct HistoryView: View {
@@ -58,6 +81,8 @@ struct HistoryView: View {
     @StateObject private var vm = HistoryViewModel()
     @State private var mode: Mode = .list
     @State private var showImport = false
+    @State private var mealEditing: MealEditTarget?  // 整餐编辑/补记弹层
+    @State private var addPicking = false            // 「记一餐」的日期/餐别选择步
 
     var body: some View {
         NavigationStack {
@@ -82,9 +107,15 @@ struct HistoryView: View {
                     switch mode {
                     case .list: list
                     case .calendar:
-                        CalendarHistoryView(days: vm.days) { date, field, dish, rating, note in
-                            vm.submitFeedback(date: date, field: field, dish: dish, rating: rating, note: note)
-                        }
+                        CalendarHistoryView(
+                            days: vm.days,
+                            onFeedback: { date, field, dish, rating, note in
+                                vm.submitFeedback(date: date, field: field, dish: dish, rating: rating, note: note)
+                            },
+                            onMealEdit: { date, field, label, meal in
+                                mealEditing = MealEditTarget(date: date, field: field, label: label, meal: meal)
+                            }
+                        )
                     }
                 }
             }
@@ -98,6 +129,13 @@ struct HistoryView: View {
                     }
                     .pickerStyle(.segmented)
                     .frame(width: 160)
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        addPicking = true
+                    } label: {
+                        Image(systemName: "plus")
+                    }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
@@ -116,6 +154,27 @@ struct HistoryView: View {
             }
             .sheet(isPresented: $showImport) {
                 ImportHistoryView { Task { await vm.load() } }
+            }
+            // 整餐编辑/补记：推荐页同款编辑器，确认后走 /api/history/apply 覆盖写入。
+            .sheet(item: $mealEditing) { target in
+                MealEditorSheet(
+                    title: "\(target.meal == nil ? "补记" : "编辑") \(target.date) \(target.label)",
+                    confirmLabel: "保存",
+                    initialTime: target.meal?.time ?? "",
+                    initialDishes: target.meal?.dishes.map { EditDish(name: $0.name, detail: $0.detail) } ?? []
+                ) { time, dishes in
+                    vm.saveMeal(date: target.date, field: target.field, time: time, dishes: dishes)
+                }
+            }
+            // 「记一餐」第一步：选日期 + 餐别（主键，先明确写到哪，防覆盖错记录）。
+            .sheet(isPresented: $addPicking) {
+                AddMealPickerSheet { date, field, label in
+                    let existing = vm.days.first { $0.date == date }?.mealOf(field: field)
+                    // 等选择步的 sheet 收完再弹编辑器——连续弹层不留间隙会被 SwiftUI 吞掉第二个。
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+                        mealEditing = MealEditTarget(date: date, field: field, label: label, meal: existing)
+                    }
+                }
             }
             // 记反馈失败：弹个可关的提示，不动列表/日历（区别于整页加载失败）。
             .alert(
@@ -138,15 +197,20 @@ struct HistoryView: View {
         List(vm.days) { day in
             Section {
                 // 一餐的具体渲染在 MealRowView（CalendarHistoryView.swift），列表和日历共用。
-                MealRowView(label: "午餐", meal: day.lunch, date: day.date, field: "lunch") { d, r, n in
-                    vm.submitFeedback(date: day.date, field: "lunch", dish: d, rating: r, note: n)
+                ForEach([("lunch", "午餐"), ("fruit", "水果"), ("dinner", "晚餐")], id: \.0) { field, label in
+                    MealRowView(
+                        label: label, meal: day.mealOf(field: field), date: day.date, field: field,
+                        onFeedback: { d, r, n in
+                            vm.submitFeedback(date: day.date, field: field, dish: d, rating: r, note: n)
+                        },
+                        onEdit: {
+                            mealEditing = MealEditTarget(date: day.date, field: field, label: label,
+                                                         meal: day.mealOf(field: field))
+                        }
+                    )
                 }
-                MealRowView(label: "水果", meal: day.fruit, date: day.date, field: "fruit") { d, r, n in
-                    vm.submitFeedback(date: day.date, field: "fruit", dish: d, rating: r, note: n)
-                }
-                MealRowView(label: "晚餐", meal: day.dinner, date: day.date, field: "dinner") { d, r, n in
-                    vm.submitFeedback(date: day.date, field: "dinner", dish: d, rating: r, note: n)
-                }
+                // 缺席的餐给「补记」入口：漏记的那顿随手补上。
+                missingChips(day)
             } header: {
                 HStack(spacing: 6) {
                     Text(day.date)
@@ -158,5 +222,64 @@ struct HistoryView: View {
         }
         .listStyle(.insetGrouped)
         .refreshable { await vm.load() }
+    }
+
+    // 一天里缺席的餐 →「补记」胶囊。三餐俱全时整行不出现。
+    @ViewBuilder
+    private func missingChips(_ day: Day) -> some View {
+        let missing = [("lunch", "午餐"), ("fruit", "水果"), ("dinner", "晚餐")].filter { field, _ in
+            let m = day.mealOf(field: field)
+            return m == nil || m!.dishes.isEmpty
+        }
+        if !missing.isEmpty {
+            HStack(spacing: 6) {
+                ForEach(missing, id: \.0) { field, label in
+                    Button {
+                        mealEditing = MealEditTarget(date: day.date, field: field, label: label, meal: nil)
+                    } label: {
+                        Text("＋ 补记\(label)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(Capsule().fill(Color.primary.opacity(0.06)))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+}
+
+// AddMealPickerSheet ——「记一餐」的第一步：选日期 + 餐别，然后进整餐编辑。
+// 独立成一步是因为日期/餐别是写入的主键，改错会覆盖别的记录——先让家长明确写到哪。
+struct AddMealPickerSheet: View {
+    let onPick: (_ date: String, _ field: String, _ label: String) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var date = Date()
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                DatePicker("日期", selection: $date, in: ...Date(), displayedComponents: .date)
+                Section("记哪一餐") {
+                    ForEach([("lunch", "午餐"), ("fruit", "水果"), ("dinner", "晚餐")], id: \.0) { field, label in
+                        Button(label) {
+                            onPick(DateFmt.ymd.string(from: date), field, label)
+                            dismiss()
+                        }
+                    }
+                }
+            }
+            .navigationTitle("记一餐")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.medium])
     }
 }

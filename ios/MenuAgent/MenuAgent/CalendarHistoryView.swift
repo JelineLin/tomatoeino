@@ -22,6 +22,8 @@ struct CalendarHistoryView: View {
     let days: [Day]
     // 记反馈的回调：(date, field, dish, rating, note)。由 HistoryView 注入（转调 VM）。
     var onFeedback: (_ date: String, _ field: String, _ dish: String, _ rating: String, _ note: String) -> Void = { _, _, _, _, _ in }
+    // 编辑/补记整餐的回调：(date, field, label, 现有餐或 nil)。日历最适合回填漏记的日子。
+    var onMealEdit: (_ date: String, _ field: String, _ label: String, _ meal: Meal?) -> Void = { _, _, _, _ in }
 
     // 当前展示的月份；nil 表示还没初始化（首次出现时跳到最近有记录的月份）。
     @State private var current: YearMonth?
@@ -144,13 +146,14 @@ struct CalendarHistoryView: View {
             .frame(maxWidth: .infinity, minHeight: 44)
         }
         .buttonStyle(.plain)
-        .disabled(!hasRecord)
+        // 不再禁用无记录的日子——点开空日期可以直接「补记」（漏记回填就在日历里完成）。
     }
 
-    // 选中日期的三餐明细。没选中或那天没记录时给一句提示，不留空白。
+    // 选中日期的三餐明细。那天没记录时给三个「补记」入口，不再只是一句提示。
     @ViewBuilder
     private var detail: some View {
-        if let dateStr = selectedDate, let day = dayByDate[dateStr] {
+        if let dateStr = selectedDate {
+            let day = dayByDate[dateStr]
             VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 8) {
                     Text(dateStr).font(.headline)
@@ -159,15 +162,16 @@ struct CalendarHistoryView: View {
                     }
                 }
                 VStack(alignment: .leading, spacing: 12) {
-                    MealRowView(label: "午餐", meal: day.lunch, date: dateStr, field: "lunch") { d, r, n in
-                        onFeedback(dateStr, "lunch", d, r, n)
-                    }
-                    MealRowView(label: "水果", meal: day.fruit, date: dateStr, field: "fruit") { d, r, n in
-                        onFeedback(dateStr, "fruit", d, r, n)
-                    }
-                    MealRowView(label: "晚餐", meal: day.dinner, date: dateStr, field: "dinner") { d, r, n in
-                        onFeedback(dateStr, "dinner", d, r, n)
-                    }
+                    MealRowView(label: "午餐", meal: day?.lunch, date: dateStr, field: "lunch",
+                                onFeedback: { d, r, n in onFeedback(dateStr, "lunch", d, r, n) },
+                                onEdit: { onMealEdit(dateStr, "lunch", "午餐", day?.lunch) })
+                    MealRowView(label: "水果", meal: day?.fruit, date: dateStr, field: "fruit",
+                                onFeedback: { d, r, n in onFeedback(dateStr, "fruit", d, r, n) },
+                                onEdit: { onMealEdit(dateStr, "fruit", "水果", day?.fruit) })
+                    MealRowView(label: "晚餐", meal: day?.dinner, date: dateStr, field: "dinner",
+                                onFeedback: { d, r, n in onFeedback(dateStr, "dinner", d, r, n) },
+                                onEdit: { onMealEdit(dateStr, "dinner", "晚餐", day?.dinner) })
+                    missingMealChips(dateStr, day: day)
                 }
                 .padding()
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -176,9 +180,34 @@ struct CalendarHistoryView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         } else {
-            Text("点选日历上带圆点的日子，查看当天吃了啥")
+            Text("点选日历上的日子：查看当天吃了啥，或给漏记的日子补记")
                 .font(.callout)
                 .foregroundStyle(.secondary)
+        }
+    }
+
+    // 缺席的餐给「补记」小入口（那天完全没记录时就是三个都在）。
+    private func missingMealChips(_ dateStr: String, day: Day?) -> some View {
+        let missing: [(String, String)] = [
+            ("lunch", "午餐"), ("fruit", "水果"), ("dinner", "晚餐"),
+        ].filter { field, _ in
+            let m = day?.mealOf(field: field)
+            return m == nil || m!.dishes.isEmpty
+        }
+        return HStack(spacing: 6) {
+            ForEach(missing, id: \.0) { field, label in
+                Button {
+                    onMealEdit(dateStr, field, label, nil)
+                } label: {
+                    Text("＋ 补记\(label)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(Capsule().fill(Color.primary.opacity(0.06)))
+                }
+                .buttonStyle(.plain)
+            }
         }
     }
 
@@ -211,6 +240,8 @@ struct MealRowView: View {
     var date: String? = nil
     var field: String? = nil                              // lunch/fruit/dinner
     var onFeedback: ((_ dish: String, _ rating: String, _ note: String) -> Void)? = nil
+    // 编辑整餐（改时间/菜品）的入口。不传 = 不显示编辑按钮（导入预览等只读场景）。
+    var onEdit: (() -> Void)? = nil
 
     // 正在编辑反馈的那道菜。sheet(item:) 需要 Identifiable——同一餐里菜名唯一（后端按名定位）。
     private struct EditingDish: Identifiable {
@@ -261,6 +292,15 @@ struct MealRowView: View {
                                 .padding(.horizontal, 6)
                                 .padding(.vertical, 2)
                                 .background(Capsule().fill(fb.tint.opacity(0.12)))
+                        }
+                        if let onEdit {
+                            Spacer(minLength: 4)
+                            Button(action: onEdit) {
+                                Label("改", systemImage: "square.and.pencil")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
                         }
                     }
                     ForEach(meal.dishes, id: \.self) { dish in
@@ -388,6 +428,18 @@ private struct FeedbackEditorSheet: View {
             }
         }
         .presentationDetents([.medium])
+    }
+}
+
+// Day 按餐别取餐（和后端 Day.mealOf 同名同义，补记/编辑的分支判断少写三遍 switch）。
+extension Day {
+    func mealOf(field: String) -> Meal? {
+        switch field {
+        case "lunch": return lunch
+        case "fruit": return fruit
+        case "dinner": return dinner
+        default: return nil
+        }
     }
 }
 
