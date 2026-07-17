@@ -64,9 +64,12 @@ export default function HistoryPage() {
     <div className="flex h-full flex-col">
       <header className="flex shrink-0 items-center justify-between border-b border-stone-200 bg-white px-4 py-3">
         <span className="font-semibold">吃饭历史</span>
-        <button onClick={load} className="text-sm text-orange-500 active:scale-95" aria-label="刷新">
-          ↻ 刷新
-        </button>
+        <div className="flex gap-3 text-sm">
+          <a href="/history/import/" className="text-orange-500 active:scale-95">⤓ 导入</a>
+          <button onClick={load} className="text-orange-500 active:scale-95" aria-label="刷新">
+            ↻ 刷新
+          </button>
+        </div>
       </header>
 
       {actionError && (

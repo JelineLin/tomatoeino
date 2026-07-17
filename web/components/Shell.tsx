@@ -12,7 +12,11 @@ import { getToken, setToken, clearToken, UNAUTHORIZED_EVENT } from "@/lib/api";
 
 const TABS = [
   { href: "/", label: "聊天", icon: "💬" },
+  { href: "/brief", label: "推荐", icon: "📋" },
   { href: "/history", label: "历史", icon: "📖" },
+  { href: "/inventory", label: "库存", icon: "📦" },
+  { href: "/seasonal", label: "时令", icon: "🌿" },
+  { href: "/profile", label: "档案", icon: "👶" },
 ];
 
 export default function Shell({ children }: { children: React.ReactNode }) {

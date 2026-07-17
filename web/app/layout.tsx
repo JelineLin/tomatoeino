@@ -8,6 +8,9 @@ import Shell from "@/components/Shell";
 export const metadata: Metadata = {
   title: "备餐助手",
   description: "幼儿备餐 agent 网页版",
+  // PWA：manifest + 苹果主屏图标——Safari「添加到主屏幕」后就是一个全屏 App。
+  manifest: "/manifest.webmanifest",
+  icons: { apple: "/apple-touch-icon.png" },
   appleWebApp: { capable: true, title: "备餐助手", statusBarStyle: "default" },
 };
 
