@@ -91,6 +91,30 @@ final class InventoryViewModel: ObservableObject {
             errorText = error.localizedDescription
         }
     }
+
+    // ---- 行内 ± 快速调份数 ----
+
+    // 每个食材一个待提交任务：连点几下只发最后一次请求。
+    private var pendingCommits: [String: Task<Void, Never>] = [:]
+
+    // adjust 行内加减：本地先改（立即回显），去抖 0.6s 后按【最终值】提交 set——
+    // 连点 +++ 合并成一次请求，也避免两次请求读到同一基数互相覆盖的丢步。
+    // 地板是 1（后端 Set 拒绝 0）：减到 1 后 − 置灰，清空整条走左滑删除，防误删。
+    func adjust(name: String, delta: Double) {
+        guard let i = items.firstIndex(where: { $0.name == name }) else { return }
+        let it = items[i]
+        let newQ = max(1, it.quantity + delta)
+        guard newQ != it.quantity else { return }
+        items[i] = InventoryItem(name: it.name, quantity: newQ, unit: it.unit)
+
+        pendingCommits[name]?.cancel()
+        pendingCommits[name] = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            guard let self, !Task.isCancelled else { return }
+            guard let cur = self.items.first(where: { $0.name == name }) else { return }
+            await self.set(name: cur.name, quantity: cur.quantity, unit: cur.unit)
+        }
+    }
 }
 
 struct InventoryView: View {
@@ -222,17 +246,40 @@ struct InventoryView: View {
                 }
                 Section {
                     ForEach(vm.items) { item in
-                        Button {
-                            editing = item
-                        } label: {
-                            HStack {
-                                Text(item.name)
-                                    .foregroundStyle(.primary)
-                                Spacer()
-                                Text("\(fmtQty(item.quantity)) \(item.unit)")
-                                    .foregroundStyle(.secondary)
-                                    .monospacedDigit()
+                        HStack(spacing: 8) {
+                            // 点名称打开完整编辑（改单位/精确小数），低频操作收进去。
+                            Button {
+                                editing = item
+                            } label: {
+                                Text(item.name).foregroundStyle(.primary)
                             }
+                            .buttonStyle(.plain)
+
+                            Spacer(minLength: 8)
+
+                            // 行内 ±：高频的「用掉一份/买回一份」不进任何页面直接调。
+                            // List 行里多个按钮必须 .borderless，否则点哪都触发整行。
+                            Button {
+                                vm.adjust(name: item.name, delta: -1)
+                            } label: {
+                                Image(systemName: "minus.circle.fill").font(.title2)
+                            }
+                            .buttonStyle(.borderless)
+                            .foregroundStyle(item.quantity > 1 ? Color.orange : Color.gray.opacity(0.35))
+                            .disabled(item.quantity <= 1)
+
+                            Text("\(fmtQty(item.quantity)) \(item.unit)")
+                                .monospacedDigit()
+                                .frame(minWidth: 52)
+                                .multilineTextAlignment(.center)
+
+                            Button {
+                                vm.adjust(name: item.name, delta: 1)
+                            } label: {
+                                Image(systemName: "plus.circle.fill").font(.title2)
+                            }
+                            .buttonStyle(.borderless)
+                            .foregroundStyle(.orange)
                         }
                     }
                     .onDelete { offsets in
@@ -240,7 +287,7 @@ struct InventoryView: View {
                         Task { for n in names { await vm.remove(name: n) } }
                     }
                 } footer: {
-                    Text("左滑删除，点条目改份数；改账和聊天里助手记的是同一本。")
+                    Text("± 直接调份数；点名称改单位/精确值；左滑删除整条。改账和聊天里助手记的是同一本。")
                 }
             }
             .refreshable { await vm.load() }
