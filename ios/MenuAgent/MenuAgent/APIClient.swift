@@ -264,6 +264,21 @@ struct APIClient {
         return try JSONDecoder().decode([Day].self, from: data)
     }
 
+    // adjustBrief 智能调整简报：把家长的自然语言要求（如「晚餐别做鱼」）发给后端，
+    // agent 基于当前简报重新生成（POST /api/brief）。和 refresh 一样要跑几十秒。
+    func adjustBrief(instruction: String) async throws -> DailyBrief {
+        var req = authorizedRequest(baseURL.appendingPathComponent("api/brief"))
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONEncoder().encode(["instruction": instruction])
+        req.timeoutInterval = 180
+        let (data, response) = try await URLSession.shared.data(for: req)
+        try Self.checkOK(response)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(DailyBrief.self, from: data)
+    }
+
     // MARK: - 流式对话
 
     // streamChat 把整段对话历史发给 /api/chat，返回一个事件异步序列。

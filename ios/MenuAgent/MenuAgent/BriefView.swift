@@ -79,6 +79,25 @@ final class BriefViewModel: ObservableObject {
         fmt.dateFormat = "yyyy-MM-dd"
         return brief.date != fmt.string(from: Date())
     }
+
+    // 智能调整：把家长的自然语言要求发给 agent，基于当前简报重新生成。
+    @Published var adjustInput = ""
+    @Published var adjusting = false
+
+    func adjust() async {
+        let ins = adjustInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !ins.isEmpty, !adjusting, !isGenerating else { return }
+        adjusting = true
+        errorText = nil
+        do {
+            brief = try await api.adjustBrief(instruction: ins)
+            restoreAppliedState()
+            adjustInput = ""
+        } catch {
+            errorText = error.localizedDescription
+        }
+        adjusting = false
+    }
 }
 
 struct BriefView: View {
@@ -114,10 +133,59 @@ struct BriefView: View {
                     .disabled(vm.isGenerating)
                 }
             }
+            // 智能调整条：有简报时贴在底部——输入「晚餐别做鱼」之类的要求，
+            // agent 基于当前简报重新生成。悬浮于滚动内容之上，不占正文空间。
+            .safeAreaInset(edge: .bottom) {
+                if vm.brief != nil {
+                    adjustBar
+                }
+            }
         }
         .task {
             if vm.brief == nil { await vm.load() }
         }
+    }
+
+    // 智能调整输入条：样式对齐聊天页 inputBar（胶囊输入框 + 圆形发送钮）。
+    // 调整要跑几十秒，期间按钮转圈、输入框禁用，但简报正文照常可看可滚。
+    private var adjustBar: some View {
+        HStack(spacing: 10) {
+            TextField("想调整？如：晚餐别做鱼，换牛肉", text: $vm.adjustInput, axis: .vertical)
+                .lineLimit(1...3)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 9)
+                .background(
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .fill(Color(.secondarySystemBackground))
+                )
+                .disabled(vm.adjusting)
+                .onSubmit { Task { await vm.adjust() } }
+
+            Button {
+                Task { await vm.adjust() }
+            } label: {
+                Group {
+                    if vm.adjusting {
+                        ProgressView().tint(.white)
+                    } else {
+                        Image(systemName: "wand.and.stars")
+                            .font(.body.weight(.semibold))
+                            .foregroundStyle(.white)
+                    }
+                }
+                .frame(width: 36, height: 36)
+                .background(Circle().fill(canAdjust ? Color.orange : Color.gray.opacity(0.35)))
+            }
+            .disabled(!canAdjust)
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 10)
+        .background(.bar)
+    }
+
+    private var canAdjust: Bool {
+        !vm.adjusting && !vm.isGenerating
+            && !vm.adjustInput.trimmingCharacters(in: .whitespaces).isEmpty
     }
 
     // MARK: - 有简报

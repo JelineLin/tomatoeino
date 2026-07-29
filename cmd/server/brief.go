@@ -104,12 +104,34 @@ func (b *briefStore) markApplied(date, mealField string, stored *menu.Meal) {
 
 // generateBrief 跑一次 agent 生成简报并落库（多用户后按 workspace 生成）。
 // 定时器和 ?refresh=1 共用这一条路。用 Generate（非流式）：没有客户端在等打字机。
+// adjustBriefPrompt 在标准简报指令基础上，附上「当前简报原文 + 家长的调整要求」。
+// 走全量重生成而非局部修补：propose_menu 的结构化登记必须完整重走一遍，
+// 前端的可编辑/可采纳卡片才不会缺块。
+func adjustBriefPrompt(cur *dailyBrief, instruction string) string {
+	var b strings.Builder
+	b.WriteString(briefPrompt)
+	if cur != nil {
+		b.WriteString("\n\n这是你早前生成的今日简报：\n")
+		b.WriteString(cur.Content)
+	}
+	b.WriteString("\n\n家长看过简报后提出了调整要求，请在满足要求的前提下重新生成完整简报，" +
+		"没被点名的部分尽量保持原安排：\n")
+	b.WriteString(instruction)
+	return b.String()
+}
+
 func generateBrief(ctx context.Context, uid string, ws *workspace) (*dailyBrief, error) {
+	return generateBriefWith(ctx, uid, ws, briefPrompt)
+}
+
+// generateBriefWith 按给定 prompt 生成并落存简报——定时任务/refresh 用标准 prompt，
+// 「智能调整」用 adjustBriefPrompt 拼出来的带指令版，落存路径完全一致。
+func generateBriefWith(ctx context.Context, uid string, ws *workspace, prompt string) (*dailyBrief, error) {
 	log.Printf("⏰ [%s] 开始生成今日简报…", uid)
 	// 往 ctx 挂一个菜单收集器：agent 若调 propose_menu，结构化菜单会写进 sink，
 	// Generate 返回后读走随简报下发（复用 trace.go 的 ctx 贯穿机制）。
 	ctx, sink := menu.WithMenuSink(ctx)
-	msg, err := ws.agent.Generate(ctx, []*schema.Message{schema.UserMessage(briefPrompt)})
+	msg, err := ws.agent.Generate(ctx, []*schema.Message{schema.UserMessage(prompt)})
 	if err != nil {
 		return nil, fmt.Errorf("生成简报失败: %w", err)
 	}
@@ -129,14 +151,41 @@ func generateBrief(ctx context.Context, uid string, ws *workspace) (*dailyBrief,
 // handleBrief 返回最近一份简报；?refresh=1 强制现做。
 // 没有简报又不要求现做时给 404 + 提示，让前端知道该怎么触发。
 func (s *server) handleBrief(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "只支持 GET", http.StatusMethodNotAllowed)
-		return
-	}
-
 	ws, err := s.ws(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+
+	// POST = 智能调整：带家长的自然语言指令，基于当前简报重新生成。
+	// （用 POST 而非新路径，和库存的「POST + 语义字段」同一套路，CORS 方法集不用动。）
+	if r.Method == http.MethodPost {
+		r.Body = http.MaxBytesReader(w, r.Body, 8<<10)
+		var req struct {
+			Instruction string `json:"instruction"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "请求体不是合法 JSON："+err.Error(), http.StatusBadRequest)
+			return
+		}
+		ins := strings.TrimSpace(req.Instruction)
+		if ins == "" {
+			http.Error(w, "instruction 不能为空", http.StatusBadRequest)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), briefGenTimeout)
+		defer cancel()
+		d, err := generateBriefWith(ctx, userIDFrom(r), ws, adjustBriefPrompt(ws.briefs.get(), ins))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		writeBriefJSON(w, d)
+		return
+	}
+
+	if r.Method != http.MethodGet {
+		http.Error(w, "只支持 GET/POST", http.StatusMethodNotAllowed)
 		return
 	}
 
