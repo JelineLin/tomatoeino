@@ -20,6 +20,12 @@
 	<string>1</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<!-- 语音输入：点麦克风说话，字直接落进聊天输入框，不用弹键盘打字。
+	     文案写清「做什么用」——审核看这两句，家长也看这两句。 -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>用来听你说的话，把它转成文字填进聊天输入框——做饭时腾不出手打字可以用。录音只在你按下麦克风时进行。</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>把你说的话转成文字填进聊天输入框，仅用于代替打字。优先在手机本地识别；本地模型不可用时会交由系统的语音识别服务转写。</string>
 	<!-- ATS：走 Apple 最严格默认（全 HTTPS）。2026-07-16 jelinelin.com 接入备案
 	     批复生效，后端已回 443 + DigiCert 证书，不再需要任何明文/自签豁免。 -->
 	<key>UILaunchScreen</key>

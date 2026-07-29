@@ -1,5 +1,7 @@
 // 聊天界面：消息气泡列表 + 底部输入框。助手回复以流式「打字机」呈现。
+// 消息支持长按操作：复制 / 编辑并重发（用户）/ 重新回答（助手）/ 复制思考过程。
 import SwiftUI
+import UIKit
 
 @MainActor
 final class ChatViewModel: ObservableObject {
@@ -42,12 +44,45 @@ final class ChatViewModel: ObservableObject {
 
         isSending = false
     }
+
+    // editMessage 编辑某条用户消息：把对话回卷到这条之前，原文放回输入框待改。
+    // 语义和主流聊天 app 一致——编辑=从那个时间点重来，之后的问答全部作废。
+    func editMessage(_ id: UUID) {
+        guard !isSending,
+              let idx = messages.firstIndex(where: { $0.id == id }),
+              messages[idx].role == .user else { return }
+        input = messages[idx].text
+        messages.removeSubrange(idx...)
+        // 客户端历史回卷后，服务端 L2 会话里存的还是完整旧历史——必须丢掉钥匙，
+        // 让下一轮走 L1 全量重建，否则编辑对模型不生效。
+        sessionID = ""
+    }
+
+    // regenerate 对某条助手回复不满意：作废它，拿它前面那条用户消息原样重问。
+    func regenerate(_ id: UUID) async {
+        guard !isSending,
+              let idx = messages.firstIndex(where: { $0.id == id }),
+              messages[idx].role == .assistant,
+              let userIdx = messages[..<idx].lastIndex(where: { $0.role == .user }) else { return }
+        let text = messages[userIdx].text
+        messages.removeSubrange(userIdx...)
+        sessionID = "" // 同 editMessage：回卷即弃钥匙
+        input = text
+        await send()
+    }
 }
 
 struct ChatView: View {
     @StateObject private var vm = ChatViewModel()
     // 输入框焦点。有了它键盘才收得回：下拉列表、发送、点空白都靠把它置 false。
     @FocusState private var inputFocused: Bool
+    // 语音听写。注意全篇【没有任何一处】因为它去改 inputFocused——
+    // 这正是「说话时不弹键盘」的全部秘诀：麦克风和输入框是两个独立控件。
+    @StateObject private var dictator = SpeechDictator()
+    // 开录那一刻输入框里已有的文字。识别结果每次回调都是「整段重来」，
+    // 拼在这个前缀后面，手打了半句再改用说的才不会被覆盖掉。
+    @State private var dictationPrefix = ""
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         NavigationStack {
@@ -57,6 +92,20 @@ struct ChatView: View {
             }
             .navigationTitle("备餐助手")
             .navigationBarTitleDisplayMode(.inline)
+        }
+        // 切走这个 tab 就收麦，别让它在后台一直占着麦克风。
+        .onDisappear { dictator.stop() }
+        // 退到后台时系统会打断音频会话，主动收摊比等它被打断干净。
+        .onChange(of: scenePhase) { phase in
+            if phase != .active { dictator.stop() }
+        }
+        .alert("语音输入", isPresented: Binding(
+            get: { dictator.errorText != nil },
+            set: { if !$0 { dictator.errorText = nil } }
+        )) {
+            Button("知道了", role: .cancel) { dictator.errorText = nil }
+        } message: {
+            Text(dictator.errorText ?? "")
         }
     }
 
@@ -68,8 +117,17 @@ struct ChatView: View {
                         emptyState
                     }
                     ForEach(vm.messages) { msg in
-                        MessageBubble(message: msg)
-                            .id(msg.id)
+                        MessageBubble(
+                            message: msg,
+                            onEdit: {
+                                inputFocused = true
+                                vm.editMessage(msg.id)
+                            },
+                            onRegenerate: {
+                                Task { await vm.regenerate(msg.id) }
+                            }
+                        )
+                        .id(msg.id)
                     }
                 }
                 .padding()
@@ -134,13 +192,45 @@ struct ChatView: View {
     }
 
     // send 统一入口：先收键盘再发，避免发送后键盘赖着不走、挡住刚冒出来的回答。
+    // 还在录音就先停——不然话音未落，识别结果会往已经清空的输入框里回填半句。
     private func send() {
+        dictator.stop()
         inputFocused = false
         Task { await vm.send() }
     }
 
+    // toggleDictation 麦克风按钮的动作：录着就停，没录就开。
+    // 开录前记下当前文字当前缀，之后识别出的整段拼在它后面。
+    private func toggleDictation() {
+        if dictator.isRecording {
+            dictator.stop()
+            return
+        }
+        let existing = vm.input.trimmingCharacters(in: .whitespacesAndNewlines)
+        dictationPrefix = existing.isEmpty ? "" : existing + " "
+        dictator.start { text in
+            vm.input = dictationPrefix + text
+        }
+    }
+
     private var inputBar: some View {
         HStack(spacing: 10) {
+            // 麦克风：录音中变红+实心，让家长一眼看出「在听」。
+            Button(action: toggleDictation) {
+                Image(systemName: dictator.isRecording ? "mic.fill" : "mic")
+                    .font(.body.weight(.medium))
+                    .foregroundStyle(dictator.isRecording ? Color.red : Color.secondary)
+                    .frame(width: 36, height: 36)
+                    .background(
+                        Circle().fill(dictator.isRecording
+                                      ? Color.red.opacity(0.12)
+                                      : Color(.secondarySystemBackground))
+                    )
+            }
+            .disabled(vm.isSending)
+            .accessibilityLabel(dictator.isRecording ? "停止语音输入" : "语音输入")
+            .animation(.easeInOut(duration: 0.15), value: dictator.isRecording)
+
             TextField("说点什么…", text: $vm.input, axis: .vertical)
                 .lineLimit(1...4)
                 .focused($inputFocused)
@@ -181,6 +271,9 @@ struct ChatView: View {
 // 用户输入是随手打的字，原样展示。
 struct MessageBubble: View {
     let message: ChatMessage
+    // 长按菜单的动作。nil = 该动作对这条消息不可用（角色不匹配或正在流式中）。
+    var onEdit: (() -> Void)? = nil
+    var onRegenerate: (() -> Void)? = nil
 
     // 思考区的展开状态：默认展开（正在思考时让用户看到进度），
     // 答案一开始出现就自动收起——此时用户的注意力应该转向结论。
@@ -199,7 +292,40 @@ struct MessageBubble: View {
                 .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                 .shadow(color: .black.opacity(isUser ? 0 : 0.06), radius: 5, y: 2)
                 .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
+                .contextMenu { menuItems }
             if !isUser { Spacer(minLength: 48) }
+        }
+    }
+
+    // 长按菜单：复制永远有；编辑限用户消息；重新回答限助手消息；
+    // 助手带思考过程时可单独复制思考。
+    @ViewBuilder
+    private var menuItems: some View {
+        Button {
+            UIPasteboard.general.string = message.text
+        } label: {
+            Label("复制", systemImage: "doc.on.doc")
+        }
+        if isUser, let onEdit {
+            Button {
+                onEdit()
+            } label: {
+                Label("编辑并重发", systemImage: "pencil")
+            }
+        }
+        if !isUser, let onRegenerate {
+            Button {
+                onRegenerate()
+            } label: {
+                Label("重新回答", systemImage: "arrow.clockwise")
+            }
+        }
+        if !isUser && !message.thinking.isEmpty {
+            Button {
+                UIPasteboard.general.string = message.thinking
+            } label: {
+                Label("复制思考过程", systemImage: "brain")
+            }
         }
     }
 
