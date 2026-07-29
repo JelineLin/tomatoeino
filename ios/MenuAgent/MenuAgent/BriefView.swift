@@ -104,6 +104,9 @@ struct BriefView: View {
     @StateObject private var vm = BriefViewModel()
     @State private var editing: EditingTarget?   // 正在编辑的那一餐（打开编辑 sheet）
     @State private var copiedMenu = false        // 复制回执：按钮短暂变「已复制」
+    // 调整输入框的焦点。和聊天页同一套路——键盘能不能收回全靠它：
+    // 下拉滚动、点正文空白、提交，三条路都把它置 false。
+    @FocusState private var adjustFocused: Bool
 
     var body: some View {
         NavigationStack {
@@ -152,6 +155,7 @@ struct BriefView: View {
         HStack(spacing: 10) {
             TextField("想调整？如：晚餐别做鱼，换牛肉", text: $vm.adjustInput, axis: .vertical)
                 .lineLimit(1...3)
+                .focused($adjustFocused)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 9)
                 .background(
@@ -159,28 +163,36 @@ struct BriefView: View {
                         .fill(Color(.secondarySystemBackground))
                 )
                 .disabled(vm.adjusting)
-                .onSubmit { Task { await vm.adjust() } }
+                .onSubmit { submitAdjust() }
 
-            Button {
-                Task { await vm.adjust() }
-            } label: {
+            // 带字的胶囊而不是光秃秃一个图标：这个按钮干的事（把一句要求交给 agent
+            // 重做整份简报）没有公认符号能表达，🪄 只会让人愣住——宁可多占几个点的宽度。
+            Button(action: submitAdjust) {
                 Group {
                     if vm.adjusting {
                         ProgressView().tint(.white)
                     } else {
-                        Image(systemName: "wand.and.stars")
-                            .font(.body.weight(.semibold))
+                        Text("调整")
+                            .font(.subheadline.weight(.semibold))
                             .foregroundStyle(.white)
                     }
                 }
-                .frame(width: 36, height: 36)
-                .background(Circle().fill(canAdjust ? Color.orange : Color.gray.opacity(0.35)))
+                .frame(width: 56, height: 36)
+                .background(Capsule().fill(canAdjust ? Color.orange : Color.gray.opacity(0.35)))
             }
             .disabled(!canAdjust)
+            .accessibilityLabel("按这条要求重新生成简报")
         }
         .padding(.horizontal)
         .padding(.vertical, 10)
         .background(.bar)
+    }
+
+    // submitAdjust 提交调整：先收键盘再发。
+    // 不收的话键盘会一直挡着——重新生成要跑几十秒，正好是最想看简报的时候。
+    private func submitAdjust() {
+        adjustFocused = false
+        Task { await vm.adjust() }
     }
 
     private var canAdjust: Bool {
@@ -209,7 +221,11 @@ struct BriefView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             }
             .padding()
+            // 点正文空白处收键盘（和聊天页一致）。放在内容上而非 ScrollView 上，
+            // 免得把下拉刷新的手势也一并吃掉。
+            .onTapGesture { adjustFocused = false }
         }
+        .scrollDismissesKeyboard(.interactively) // 往下滑就能把键盘拽回去
         .refreshable { await vm.load() } // 下拉只拉现成的；重新生成走右上角按钮
         .sheet(item: $editing) { target in
             MealEditorSheet(
