@@ -42,7 +42,14 @@ func init() {
 //
 // 只会「聊天」（Generate/Stream），不带工具调用能力。例子 01/03 用的就是它。
 func NewChatModel(ctx context.Context) (model.BaseChatModel, error) {
-	return newOpenAIChatModel(ctx)
+	return newOpenAIChatModel(ctx, "")
+}
+
+// NewChatModelWithModel 复用同一套 provider 凭证，但把模型名固定在调用方指定值。
+// 适合 monorepo 里的独立应用：menuagent 可以继续走 ark-code-latest，English Coach
+// 则锁定一个经过课程评测的模型，避免控制台 Auto 路由变化导致课程难度漂移。
+func NewChatModelWithModel(ctx context.Context, modelName string) (model.BaseChatModel, error) {
+	return newOpenAIChatModel(ctx, strings.TrimSpace(modelName))
 }
 
 // NewToolCallingChatModel 和 NewChatModel 连的是同一个模型、同一套环境变量，
@@ -54,13 +61,13 @@ func NewChatModel(ctx context.Context) (model.BaseChatModel, error) {
 // 就像同一个 LP client，对账模块只要「查询」接口，下单模块要「查询+下单」接口——
 // 同一个实例，按调用方需要的能力面暴露。
 func NewToolCallingChatModel(ctx context.Context) (model.ToolCallingChatModel, error) {
-	return newOpenAIChatModel(ctx)
+	return newOpenAIChatModel(ctx, "")
 }
 
 // newOpenAIChatModel 是私有构造：读环境变量、建出具体的 *openai.ChatModel。
 // 上面两个公开工厂都复用它，只是把返回值「向上转型」成各自需要的接口——
 // 把「怎么连模型」这件事收敛到唯一一处，换 provider / 改默认值只动这里。
-func newOpenAIChatModel(ctx context.Context) (*openai.ChatModel, error) {
+func newOpenAIChatModel(ctx context.Context, modelOverride string) (*openai.ChatModel, error) {
 	apiKey := os.Getenv("OPENAI_API_KEY")
 	if apiKey == "" {
 		return nil, fmt.Errorf("环境变量 OPENAI_API_KEY 未设置")
@@ -71,7 +78,10 @@ func newOpenAIChatModel(ctx context.Context) (*openai.ChatModel, error) {
 		baseURL = "https://api.openai.com/v1" // 默认官方地址
 	}
 
-	modelName := os.Getenv("OPENAI_MODEL")
+	modelName := modelOverride
+	if modelName == "" {
+		modelName = os.Getenv("OPENAI_MODEL")
+	}
 	if modelName == "" {
 		modelName = "gpt-4o-mini" // 学习阶段用便宜的小模型即可
 	}
@@ -148,9 +158,9 @@ func firstNonEmpty(vals ...string) string {
 //   - OPENAI_EMBEDDING_BASE_URL : embedding 专用网关地址；留空则回退用 OPENAI_BASE_URL
 //   - OPENAI_EMBEDDING_MODEL    : embedding 模型名 / 接入点 ID，默认 text-embedding-3-small
 //   - OPENAI_EMBEDDING_BATCH    : 是否允许「一次一批」。默认 true（OpenAI 支持批量）；
-//                                 豆包等「单次只收一条」的接入点设为 false，会自动改走逐条调用。
+//     豆包等「单次只收一条」的接入点设为 false，会自动改走逐条调用。
 //   - OPENAI_EMBEDDING_MULTIMODAL : 设为 true 改用方舟多模态向量接口（doubao-embedding-vision，
-//                                   非标准协议，见 ark_embedding.go）；默认 false 走标准 OpenAI 协议。
+//     非标准协议，见 ark_embedding.go）；默认 false 走标准 OpenAI 协议。
 //
 // 注意 embedding 和 chat 是「两个不同的模型/接口」：各算各的钱、各有各的模型名，
 // 甚至各有各的 key，不能混用。

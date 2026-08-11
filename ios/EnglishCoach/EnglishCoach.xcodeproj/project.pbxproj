@@ -1,0 +1,177 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		EC1100000000000000000020 /* EnglishCoachApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = EC1100000000000000000010 /* EnglishCoachApp.swift */; };
+		EC1100000000000000000021 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = EC1100000000000000000011 /* Models.swift */; };
+		EC1100000000000000000022 /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = EC1100000000000000000012 /* KeychainStore.swift */; };
+		EC1100000000000000000023 /* APIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = EC1100000000000000000013 /* APIClient.swift */; };
+		EC1100000000000000000024 /* Components.swift in Sources */ = {isa = PBXBuildFile; fileRef = EC1100000000000000000014 /* Components.swift */; };
+		EC1100000000000000000025 /* TodayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EC1100000000000000000015 /* TodayView.swift */; };
+		EC1100000000000000000026 /* RecordView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EC1100000000000000000016 /* RecordView.swift */; };
+		EC1100000000000000000027 /* LibraryViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = EC1100000000000000000017 /* LibraryViews.swift */; };
+		EC1100000000000000000028 /* ProfileView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EC1100000000000000000018 /* ProfileView.swift */; };
+		EC1100000000000000000029 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = EC110000000000000000001A /* Assets.xcassets */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		EC1100000000000000000006 /* EnglishCoach.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = EnglishCoach.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		EC1100000000000000000010 /* EnglishCoachApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnglishCoachApp.swift; sourceTree = "<group>"; };
+		EC1100000000000000000011 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
+		EC1100000000000000000012 /* KeychainStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainStore.swift; sourceTree = "<group>"; };
+		EC1100000000000000000013 /* APIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIClient.swift; sourceTree = "<group>"; };
+		EC1100000000000000000014 /* Components.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Components.swift; sourceTree = "<group>"; };
+		EC1100000000000000000015 /* TodayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TodayView.swift; sourceTree = "<group>"; };
+		EC1100000000000000000016 /* RecordView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordView.swift; sourceTree = "<group>"; };
+		EC1100000000000000000017 /* LibraryViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryViews.swift; sourceTree = "<group>"; };
+		EC1100000000000000000018 /* ProfileView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileView.swift; sourceTree = "<group>"; };
+		EC1100000000000000000019 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		EC110000000000000000001A /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		EC1100000000000000000008 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		EC1100000000000000000002 = {
+			isa = PBXGroup;
+			children = (EC1100000000000000000003 /* EnglishCoach */, EC1100000000000000000004 /* Products */);
+			sourceTree = "<group>";
+		};
+		EC1100000000000000000003 /* EnglishCoach */ = {
+			isa = PBXGroup;
+			children = (
+				EC1100000000000000000010 /* EnglishCoachApp.swift */,
+				EC1100000000000000000011 /* Models.swift */,
+				EC1100000000000000000012 /* KeychainStore.swift */,
+				EC1100000000000000000013 /* APIClient.swift */,
+				EC1100000000000000000014 /* Components.swift */,
+				EC1100000000000000000015 /* TodayView.swift */,
+				EC1100000000000000000016 /* RecordView.swift */,
+				EC1100000000000000000017 /* LibraryViews.swift */,
+				EC1100000000000000000018 /* ProfileView.swift */,
+				EC1100000000000000000019 /* Info.plist */,
+				EC110000000000000000001A /* Assets.xcassets */,
+			);
+			path = EnglishCoach;
+			sourceTree = "<group>";
+		};
+		EC1100000000000000000004 /* Products */ = {
+			isa = PBXGroup;
+			children = (EC1100000000000000000006 /* EnglishCoach.app */);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		EC1100000000000000000005 /* EnglishCoach */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = EC110000000000000000000B /* Build configuration list for PBXNativeTarget "EnglishCoach" */;
+			buildPhases = (EC1100000000000000000007 /* Sources */, EC1100000000000000000008 /* Frameworks */, EC1100000000000000000009 /* Resources */);
+			buildRules = ();
+			dependencies = ();
+			name = EnglishCoach;
+			productName = EnglishCoach;
+			productReference = EC1100000000000000000006 /* EnglishCoach.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		EC1100000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {BuildIndependentTargetsInParallel = 1; LastSwiftUpdateCheck = 2630; LastUpgradeCheck = 2630; TargetAttributes = {EC1100000000000000000005 = {CreatedOnToolsVersion = 26.3; }; }; };
+			buildConfigurationList = EC110000000000000000000A /* Build configuration list for PBXProject "EnglishCoach" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (en, Base);
+			mainGroup = EC1100000000000000000002;
+			productRefGroup = EC1100000000000000000004 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (EC1100000000000000000005 /* EnglishCoach */);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		EC1100000000000000000009 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (EC1100000000000000000029 /* Assets.xcassets in Resources */); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		EC1100000000000000000007 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				EC1100000000000000000020 /* EnglishCoachApp.swift in Sources */,
+				EC1100000000000000000021 /* Models.swift in Sources */,
+				EC1100000000000000000022 /* KeychainStore.swift in Sources */,
+				EC1100000000000000000023 /* APIClient.swift in Sources */,
+				EC1100000000000000000024 /* Components.swift in Sources */,
+				EC1100000000000000000025 /* TodayView.swift in Sources */,
+				EC1100000000000000000026 /* RecordView.swift in Sources */,
+				EC1100000000000000000027 /* LibraryViews.swift in Sources */,
+				EC1100000000000000000028 /* ProfileView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		EC110000000000000000000C /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {ALWAYS_SEARCH_USER_PATHS = NO; CLANG_ANALYZER_NONNULL = YES; CLANG_ENABLE_MODULES = YES; CLANG_ENABLE_OBJC_ARC = YES; COPY_PHASE_STRIP = NO; DEBUG_INFORMATION_FORMAT = dwarf; ENABLE_STRICT_OBJC_MSGSEND = YES; ENABLE_TESTABILITY = YES; GCC_DYNAMIC_NO_PIC = NO; GCC_OPTIMIZATION_LEVEL = 0; GCC_PREPROCESSOR_DEFINITIONS = ("DEBUG=1", "$(inherited)"); IPHONEOS_DEPLOYMENT_TARGET = 16.0; MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE; ONLY_ACTIVE_ARCH = YES; SDKROOT = iphoneos; SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG; SWIFT_OPTIMIZATION_LEVEL = "-Onone"; }; name = Debug; };
+		EC110000000000000000000D /* Release */ = {isa = XCBuildConfiguration; buildSettings = {ALWAYS_SEARCH_USER_PATHS = NO; CLANG_ANALYZER_NONNULL = YES; CLANG_ENABLE_MODULES = YES; CLANG_ENABLE_OBJC_ARC = YES; COPY_PHASE_STRIP = NO; DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym"; ENABLE_NS_ASSERTIONS = NO; ENABLE_STRICT_OBJC_MSGSEND = YES; IPHONEOS_DEPLOYMENT_TARGET = 16.0; MTL_ENABLE_DEBUG_INFO = NO; SDKROOT = iphoneos; SWIFT_COMPILATION_MODE = wholemodule; SWIFT_OPTIMIZATION_LEVEL = "-O"; VALIDATE_PRODUCT = YES; }; name = Release; };
+		EC110000000000000000000E /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = L7M693XF47;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = EnglishCoach/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks");
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.jeline.englishcoach.ios;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		EC110000000000000000000F /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = L7M693XF47;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = EnglishCoach/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks");
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.jeline.englishcoach.ios;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		EC110000000000000000000A /* Build configuration list for PBXProject "EnglishCoach" */ = {isa = XCConfigurationList; buildConfigurations = (EC110000000000000000000C /* Debug */, EC110000000000000000000D /* Release */); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		EC110000000000000000000B /* Build configuration list for PBXNativeTarget "EnglishCoach" */ = {isa = XCConfigurationList; buildConfigurations = (EC110000000000000000000E /* Debug */, EC110000000000000000000F /* Release */); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+/* End XCConfigurationList section */
+	};
+	rootObject = EC1100000000000000000001 /* Project object */;
+}

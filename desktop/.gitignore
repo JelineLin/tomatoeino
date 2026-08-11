@@ -1,0 +1,6 @@
+build/bin/
+build/appicon.png
+build/windows/
+frontend/*
+!frontend/.gitkeep
+wailsjs/

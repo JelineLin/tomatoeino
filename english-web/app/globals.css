@@ -1,0 +1,9 @@
+@import "tailwindcss";
+
+html, body { height: 100dvh; -webkit-tap-highlight-color: transparent; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI", sans-serif;
+  background: #f5f7ff;
+}
+button, input, textarea, select { font: inherit; }
+::selection { background: #c7d2fe; }

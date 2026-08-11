@@ -20,7 +20,7 @@ REMOTE   := /opt/menuagent/server
 # 2026-07-16 起走 TLS+域名（8080 明文口已封），healthz 也从这里探。
 HEALTH   := https://jelinelin.com/healthz
 
-.PHONY: build test vet linux release deploy web deploy-web clean
+.PHONY: build test vet linux release deploy web deploy-web english-build english-linux english-web desktop-test desktop-build clean
 
 build:
 	go build ./...
@@ -82,6 +82,29 @@ web:
 	@test -d web/node_modules || (cd web && npm ci)
 	cd web && npm run build
 	@du -sh web/out | awk '{print "  built: web/out", $$1}'
+
+# English Coach：同一 monorepo 的第二个独立实例，不复用 menuagent 进程或静态目录。
+english-build:
+	go build ./cmd/english-server
+
+english-linux:
+	mkdir -p dist
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o dist/englishcoach-linux-amd64 ./cmd/english-server
+	@ls -lh dist/englishcoach-linux-amd64 | awk '{print "  built:", $$9, $$5}'
+
+english-web:
+	@test -d english-web/node_modules || (cd english-web && if test -f package-lock.json; then npm ci; else npm install; fi)
+	cd english-web && npm run build
+	@du -sh english-web/out | awk '{print "  built: english-web/out", $$1}'
+
+# macOS 桌面版：Wails 使用原生 WKWebView，内嵌 english-web 静态资源并代理到 English 后端。
+# wails build 会触发框架资源/绑定生成，所以按仓库约定只提供给开发者手动执行。
+desktop-test:
+	cd desktop && go test ./...
+
+desktop-build:
+	cd desktop && go run github.com/wailsapp/wails/v2/cmd/wails@v2.13.0 build
+	@echo "✅ desktop/build/bin/EnglishCoach.app"
 
 # 部署网页版：纯静态文件 rsync 到服务器，Go 进程【不用重启】——
 # spaHandler 每个请求现读磁盘，文件换了下一个请求就是新页面。

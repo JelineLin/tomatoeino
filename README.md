@@ -2,7 +2,8 @@
 
 学习 [CloudWeGo **eino**](https://github.com/cloudwego/eino)（Go 的 LLM 应用框架）的练手仓库。
 `examples/` 下是一组逐个递进的小例子；在此之上，把「幼儿备餐」做成了一个完整的
-**ReAct agent 后端 + SwiftUI iOS 前端**。
+**ReAct agent 后端 + SwiftUI iOS 前端**，并在同一 monorepo 中提供独立部署的
+**English Coach 后端 + Web App + Wails macOS 桌面端**。
 
 ## 这是 agent，不是 AIGC
 
@@ -20,6 +21,10 @@ internal/llm/         连模型的唯一出口：NewChatModel / NewToolCallingCh
 internal/vectorstore/ 从零写的内存向量库（cosine 检索），实现 eino 的 retriever.Retriever
 internal/menu/        备餐 agent 业务核心：领域类型 + 知识库 + 工具 + ReAct 装配
 cmd/server/           HTTP 后端：SSE 流式 /api/chat + REST /api/history + /healthz
+internal/english/     英语课程、SQLite 学习账本、进度规则、转写对齐与模型生成
+cmd/english-server/   独立 English Coach API / generate-today 命令，默认监听 :8450
+english-web/          独立 Next.js 静态前端（今日课程、朗读、历史、趋势、周报、档案）
+desktop/              Wails macOS 桌面壳（内嵌 Web UI，安全代理到同一个 English 后端）
 examples/02_menu_agent/  同一个 agent 的命令行版 demo
 ios/MenuAgent/        SwiftUI App（聊天 tab + 历史 tab），完整 Xcode 工程
 ```
@@ -67,6 +72,46 @@ open ios/MenuAgent/MenuAgent.xcodeproj
 在 Xcode 里选一个 iOS 模拟器，Run。模拟器的 `localhost` 直连 Mac 本机后端
 （已在 Info.plist 用 `NSAllowsLocalNetworking` 放行 http）。真机调试时把
 `ios/MenuAgent/MenuAgent/APIClient.swift` 里的 `baseURL` 改成 Mac 的局域网 IP。
+
+### 4. English Coach（独立实例）
+
+English Coach 复用 `.env` 中的 Key 和 Base URL，但通过 `ENGLISH_OPENAI_MODEL`
+固定自己的文本模型；SQLite、录音、提示词、前端和端口均不与 menuagent 共用。
+朗读上传会通过 `ffprobe` 校验真实时长，并用 `ffmpeg` 转成 16kHz 单声道 WAV，
+因此部署主机需要安装 ffmpeg（未安装时录音仍会保存，但本次评测返回降级状态）。
+
+```bash
+go run ./cmd/english-server          # 默认 :8450
+go run ./cmd/english-server generate-today
+
+cd english-web
+npm install                          # 首次安装；随后可使用 npm ci
+npm run dev                          # 开发时把 /api 代理到 :8450
+```
+
+自动生成由 `deploy/englishcoach-generate.timer` 在工作日 08:00 触发。DNS、证书、
+Nginx 和 systemd 文件启用属于服务器变更，需确认后手动执行。
+
+课程内容默认使用每周混合安排：周一新概念英语能力路径、周二 China Daily、
+周三 GitHub Engineering / Google Search Central / Cloudflare 等官方技术源、周四
+IELTS Academic/General 风格、周五按个人问题词复习。新闻与技术课程只读取标题、
+摘要和原文链接，再生成 250～350 词的 CEFR 分级原创短文；不会把第三方文章或
+商业教材课文整篇保存进应用。每课会持久化来源、发布日期、能力点和改写说明，
+最近 30 个外部 URL 会参与去重；来源暂时不可用时安全降级为同主题原创课程。
+
+### 5. English Coach macOS 桌面端
+
+桌面端复用同一套 Web UI 和同一个远端后端，继续使用现有访问码；不会把模型密钥
+或第二份 SQLite 数据库打进应用。默认通过 `https://jelinelin.com/api/english/*`
+连接独立 English Coach 进程，本地联调可覆盖：
+
+```bash
+ENGLISH_DESKTOP_API_URL=http://127.0.0.1:8450 make desktop-build
+open desktop/build/bin/EnglishCoach.app
+```
+
+构建阶段需要 npm 和 Wails，最终 `.app` 运行时不需要 Node。Wails 打包会执行框架资源/
+绑定生成步骤，因此按本仓库约定由开发者手动运行 `make desktop-build`。
 
 ## 其它命令
 

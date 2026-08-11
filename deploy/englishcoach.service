@@ -1,0 +1,25 @@
+[Unit]
+Description=English Coach web service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hermas
+Group=hermas
+WorkingDirectory=/opt/englishcoach
+EnvironmentFile=/opt/englishcoach/.env
+Environment=ENGLISH_PORT=8450
+Environment=ENGLISH_DB_PATH=/var/lib/englishcoach/learning.db
+Environment=ENGLISH_AUDIO_DIR=/var/lib/englishcoach/audio
+Environment=ENGLISH_WEB_DIR=/opt/englishcoach/web/out
+ExecStart=/opt/englishcoach/server
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/englishcoach
+
+[Install]
+WantedBy=multi-user.target

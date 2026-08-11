@@ -1,0 +1,10 @@
+[Unit]
+Description=Generate English Coach lesson at 08:00 on weekdays
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 08:00:00
+Persistent=true
+Unit=englishcoach-generate.service
+
+[Install]
+WantedBy=timers.target

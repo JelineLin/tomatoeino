@@ -1,0 +1,4 @@
+export function Header({ title, subtitle }: { title: string; subtitle?: string }) { return <header className="sticky top-0 z-10 border-b border-indigo-100 bg-white/90 px-5 py-4 backdrop-blur"><h1 className="text-lg font-bold text-indigo-950">{title}</h1>{subtitle && <p className="mt-0.5 text-xs text-slate-500">{subtitle}</p>}</header> }
+export function Loading() { return <div className="flex justify-center py-20"><span className="h-7 w-7 animate-spin rounded-full border-2 border-indigo-200 border-t-indigo-600" /></div> }
+export function Empty({ children }: { children: React.ReactNode }) { return <div className="mx-5 mt-10 rounded-3xl border border-dashed border-indigo-200 bg-white p-8 text-center text-sm text-slate-500">{children}</div> }
+export const percent = (n: number) => `${Math.round(n * 100)}%`;

@@ -1,0 +1,21 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "English Coach",
+  "outputfilename": "EnglishCoach",
+  "assetdir": "frontend",
+  "build:dir": "build",
+  "wailsjsdir": "../desktop/wailsjs",
+  "frontend:dir": "../english-web",
+  "frontend:install": "test -d node_modules || npm install",
+  "frontend:build": "npm run build && cd ../desktop && go run ./cmd/stage-assets",
+  "author": {
+    "name": "Jeline Lin"
+  },
+  "info": {
+    "companyName": "Jeline Lin",
+    "productName": "English Coach",
+    "productVersion": "0.1.0",
+    "copyright": "Copyright © 2026 Jeline Lin",
+    "comments": "Personal English reading and speaking coach"
+  }
+}
