@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -81,13 +82,19 @@ func (s *server) handleLesson(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleAnswers(w http.ResponseWriter, r *http.Request) {
+	userID := userIDFrom(r)
 	if r.Method == http.MethodGet {
 		lessonID, err := strconv.ParseInt(r.URL.Query().Get("lesson_id"), 10, 64)
 		if err != nil || lessonID <= 0 {
 			http.Error(w, "lesson_id 无效", http.StatusBadRequest)
 			return
 		}
-		v, err := s.store.LatestReadingAttempt(r.Context(), userIDFrom(r), lessonID)
+		v, err := s.store.LatestReadingAttempt(r.Context(), userID, lessonID)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		v, err = s.withReadingReview(r.Context(), userID, v)
 		if err != nil {
 			writeError(w, err)
 			return
@@ -107,12 +114,25 @@ func (s *server) handleAnswers(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "JSON 无效", 400)
 		return
 	}
-	v, err := s.store.SaveReadingAttempt(r.Context(), userIDFrom(r), req.LessonID, req.Answers)
+	v, err := s.store.SaveReadingAttempt(r.Context(), userID, req.LessonID, req.Answers)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	v, err = s.withReadingReview(r.Context(), userID, v)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
 	writeJSON(w, 201, v)
+}
+
+func (s *server) withReadingReview(ctx context.Context, userID string, attempt english.ReadingAttempt) (english.ReadingAttempt, error) {
+	lesson, err := s.store.Lesson(ctx, userID, attempt.LessonID)
+	if err != nil {
+		return english.ReadingAttempt{}, err
+	}
+	return english.WithReadingReview(attempt, lesson), nil
 }
 
 func (s *server) handleProgress(w http.ResponseWriter, r *http.Request) {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -84,7 +85,7 @@ func TestHandleAnswersRestoresLatestSubmission(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 	lesson, _, err := store.PutLesson(context.Background(), english.Lesson{
 		UserID: "alice", Date: "2026-08-07", Title: "T", Passage: "Text",
-		Questions: []english.Question{{ID: "q1", Answer: "A"}},
+		Questions: []english.Question{{ID: "q1", Answer: "A", Explain: "Because A matches the passage."}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -108,5 +109,65 @@ func TestHandleAnswersRestoresLatestSubmission(t *testing.T) {
 	}
 	if got.ID != want.ID || len(got.Answers) != 1 || got.Answers[0].Value != "A" {
 		t.Fatalf("got %+v, want %+v", got, want)
+	}
+	if len(got.Review) != 1 || got.Review[0].CorrectAnswer != "A" || !got.Review[0].IsCorrect || got.Review[0].Explanation == "" {
+		t.Fatalf("已提交答案没有返回逐题解析: %+v", got.Review)
+	}
+
+	bobReq := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/english/answers?lesson_id=%d", lesson.ID), nil)
+	bobReq = bobReq.WithContext(context.WithValue(bobReq.Context(), userKey{}, "bob"))
+	bobResponse := httptest.NewRecorder()
+	s.handleAnswers(bobResponse, bobReq)
+	if bobResponse.Code != http.StatusNotFound {
+		t.Fatalf("其他用户不应读取答案, status=%d body=%s", bobResponse.Code, bobResponse.Body.String())
+	}
+}
+
+func TestHandleAnswersPostReturnsReviewWithoutChangingPublicLesson(t *testing.T) {
+	store, err := english.OpenStore(filepath.Join(t.TempDir(), "learning.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	lesson, _, err := store.PutLesson(context.Background(), english.Lesson{
+		UserID: "alice", Date: "2026-08-08", Title: "T", Passage: "Text",
+		Questions: []english.Question{{ID: "q1", Answer: "B", Explain: "文中第二段直接说明。"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s := &server{store: store}
+	body, _ := json.Marshal(map[string]any{
+		"lesson_id": lesson.ID,
+		"answers":   []english.Answer{{QuestionID: "q1", Value: "A"}},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/english/answers", bytes.NewReader(body))
+	req = req.WithContext(context.WithValue(req.Context(), userKey{}, "alice"))
+	response := httptest.NewRecorder()
+	s.handleAnswers(response, req)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var got english.ReadingAttempt
+	if err := json.NewDecoder(response.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Review) != 1 || got.Review[0].CorrectAnswer != "B" || got.Review[0].IsCorrect || got.Review[0].Explanation == "" {
+		t.Fatalf("提交后解析错误: %+v", got.Review)
+	}
+	lessonReq := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/english/lessons/%d", lesson.ID), nil)
+	lessonReq = lessonReq.WithContext(context.WithValue(lessonReq.Context(), userKey{}, "alice"))
+	lessonResponse := httptest.NewRecorder()
+	s.handleLesson(lessonResponse, lessonReq)
+	if lessonResponse.Code != http.StatusOK {
+		t.Fatalf("lesson status=%d body=%s", lessonResponse.Code, lessonResponse.Body.String())
+	}
+	var public english.Lesson
+	if err := json.NewDecoder(lessonResponse.Body).Decode(&public); err != nil {
+		t.Fatal(err)
+	}
+	if public.Questions[0].Answer != "" || public.Questions[0].Explain != "" {
+		t.Fatalf("课程 API 泄露答案: %+v", public.Questions[0])
 	}
 }

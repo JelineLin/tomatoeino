@@ -4,7 +4,10 @@
 // 统一鉴权/网关，但订单、状态机和对账账本必须彼此隔离。
 package english
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 const (
 	DefaultLevel        = "B1"
@@ -83,15 +86,44 @@ type Answer struct {
 	Value      string `json:"value"`
 }
 
+// ReadingReview 只随已提交的 ReadingAttempt 返回。课程下发时仍通过 PublicLesson
+// 隐去答案，避免用户在作答前从网络响应中直接看到评分依据。
+type ReadingReview struct {
+	QuestionID    string `json:"question_id"`
+	CorrectAnswer string `json:"correct_answer"`
+	IsCorrect     bool   `json:"is_correct"`
+	Explanation   string `json:"explanation"`
+}
+
 type ReadingAttempt struct {
-	ID          int64     `json:"id"`
-	UserID      string    `json:"user_id"`
-	LessonID    int64     `json:"lesson_id"`
-	Answers     []Answer  `json:"answers"`
-	Correct     int       `json:"correct"`
-	Total       int       `json:"total"`
-	Accuracy    float64   `json:"accuracy"`
-	CompletedAt time.Time `json:"completed_at"`
+	ID          int64           `json:"id"`
+	UserID      string          `json:"user_id"`
+	LessonID    int64           `json:"lesson_id"`
+	Answers     []Answer        `json:"answers"`
+	Review      []ReadingReview `json:"review,omitempty"`
+	Correct     int             `json:"correct"`
+	Total       int             `json:"total"`
+	Accuracy    float64         `json:"accuracy"`
+	CompletedAt time.Time       `json:"completed_at"`
+}
+
+// WithReadingReview 在确认用户已经提交后，把服务端保存的答案和解析装配到答题记录。
+// 它不修改课程，也不会影响 PublicLesson 的脱敏结果。
+func WithReadingReview(attempt ReadingAttempt, lesson Lesson) ReadingAttempt {
+	provided := make(map[string]string, len(attempt.Answers))
+	for _, answer := range attempt.Answers {
+		provided[answer.QuestionID] = answer.Value
+	}
+	attempt.Review = make([]ReadingReview, 0, len(lesson.Questions))
+	for _, question := range lesson.Questions {
+		attempt.Review = append(attempt.Review, ReadingReview{
+			QuestionID:    question.ID,
+			CorrectAnswer: question.Answer,
+			IsCorrect:     strings.EqualFold(strings.TrimSpace(question.Answer), strings.TrimSpace(provided[question.ID])),
+			Explanation:   question.Explain,
+		})
+	}
+	return attempt
 }
 
 type WordIssue struct {

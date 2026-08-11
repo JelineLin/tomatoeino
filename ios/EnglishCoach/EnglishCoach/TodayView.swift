@@ -129,6 +129,7 @@ struct TodayView: View {
                 }
             }
             ForEach(Array(lesson.questions.enumerated()), id: \.element.id) { index, question in
+                let review = attempt?.review?.first { $0.questionID == question.id }
                 VStack(alignment: .leading, spacing: 10) {
                     if let type = question.type, !type.isEmpty {
                         Text(type.replacingOccurrences(of: "_", with: " ").uppercased())
@@ -142,15 +143,33 @@ struct TodayView: View {
                             selections[question.id] = value
                         } label: {
                             HStack(alignment: .top) {
-                                Image(systemName: selections[question.id] == value ? "largecircle.fill.circle" : "circle")
-                                    .foregroundStyle(.indigo)
+                                Image(systemName: optionIcon(questionID: question.id, value: value, review: review))
+                                    .foregroundStyle(optionColor(questionID: question.id, value: value, review: review))
                                 Text(option).foregroundStyle(.primary).multilineTextAlignment(.leading)
                                 Spacer()
                             }
                             .padding(12)
-                            .background(selections[question.id] == value ? Color.indigo.opacity(0.1) : Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
+                            .background(optionBackground(questionID: question.id, value: value, review: review), in: RoundedRectangle(cornerRadius: 12))
                         }
                         .buttonStyle(.plain)
+                    }
+                    if let review {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Label(
+                                review.isCorrect ? "回答正确" : "正确答案：\(review.correctAnswer)",
+                                systemImage: review.isCorrect ? "checkmark.circle.fill" : "lightbulb.fill"
+                            )
+                            .font(.subheadline.bold())
+                            if !review.explanation.isEmpty {
+                                Text("解析：\(review.explanation)")
+                                    .font(.subheadline)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                        .foregroundStyle(review.isCorrect ? Color.green : Color.orange)
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background((review.isCorrect ? Color.green : Color.orange).opacity(0.1), in: RoundedRectangle(cornerRadius: 12))
                     }
                 }
             }
@@ -173,6 +192,36 @@ struct TodayView: View {
         }
         .padding()
         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 18))
+    }
+
+    private func optionIcon(questionID: String, value: String, review: ReadingReview?) -> String {
+        if let review, review.correctAnswer.caseInsensitiveCompare(value) == .orderedSame {
+            return "checkmark.circle.fill"
+        }
+        if review != nil, selections[questionID] == value {
+            return "xmark.circle.fill"
+        }
+        return selections[questionID] == value ? "largecircle.fill.circle" : "circle"
+    }
+
+    private func optionColor(questionID: String, value: String, review: ReadingReview?) -> Color {
+        if let review, review.correctAnswer.caseInsensitiveCompare(value) == .orderedSame {
+            return .green
+        }
+        if review != nil, selections[questionID] == value {
+            return .red
+        }
+        return .indigo
+    }
+
+    private func optionBackground(questionID: String, value: String, review: ReadingReview?) -> Color {
+        if let review, review.correctAnswer.caseInsensitiveCompare(value) == .orderedSame {
+            return Color.green.opacity(0.13)
+        }
+        if review != nil, selections[questionID] == value {
+            return Color.red.opacity(0.11)
+        }
+        return selections[questionID] == value ? Color.indigo.opacity(0.1) : Color.secondary.opacity(0.06)
     }
 
     private func load() async {

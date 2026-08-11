@@ -2,7 +2,8 @@ export interface Vocabulary { word: string; meaning: string; example: string; pr
 export interface Question { id: string; type?: string; prompt: string; options: string[]; explanation?: string }
 export interface Lesson { id: number; date: string; title: string; passage: string; vocabulary: Vocabulary[]; questions: Question[]; difficulty: number; generation_reason: string; estimated_minutes: number; content_mode: string; exercise_style: string; syllabus_focus: string; source_name: string; source_title: string; source_url: string; source_published_at: string; adaptation_note: string }
 export interface ReadingAnswer { question_id: string; value: string }
-export interface ReadingAttempt { id: number; lesson_id: number; answers: ReadingAnswer[]; correct: number; total: number; accuracy: number; completed_at: string }
+export interface ReadingReview { question_id: string; correct_answer: string; is_correct: boolean; explanation: string }
+export interface ReadingAttempt { id: number; lesson_id: number; answers: ReadingAnswer[]; review?: ReadingReview[]; correct: number; total: number; accuracy: number; completed_at: string }
 export interface WordIssue { expected: string; actual?: string; kind: string }
 export interface SpeakingAttempt { id: number; lesson_id: number; duration_seconds: number; transcript: string; wpm: number; accuracy: number; score: number; feedback: string; issues: WordIssue[] }
 export interface Progress { level: string; difficulty: number; completion_rate_4w: number; reading_accuracy_4w: number; speaking_accuracy_4w: number; speaking_speed_wpm: number; recurring_errors: string[]; lessons_assigned: number; lessons_completed: number; recommended_difficulty: number }

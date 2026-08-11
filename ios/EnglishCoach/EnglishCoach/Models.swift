@@ -59,18 +59,34 @@ struct ReadingAnswer: Codable, Hashable {
     }
 }
 
+struct ReadingReview: Codable, Identifiable {
+    var id: String { questionID }
+    let questionID: String
+    let correctAnswer: String
+    let isCorrect: Bool
+    let explanation: String
+
+    enum CodingKeys: String, CodingKey {
+        case questionID = "question_id"
+        case correctAnswer = "correct_answer"
+        case isCorrect = "is_correct"
+        case explanation
+    }
+}
+
 struct ReadingAttempt: Codable, Identifiable {
     let id: Int64
     let userID: String
     let lessonID: Int64
     let answers: [ReadingAnswer]
+    let review: [ReadingReview]?
     let correct: Int
     let total: Int
     let accuracy: Double
     let completedAt: String
 
     enum CodingKeys: String, CodingKey {
-        case id, answers, correct, total, accuracy
+        case id, answers, review, correct, total, accuracy
         case userID = "user_id"
         case lessonID = "lesson_id"
         case completedAt = "completed_at"

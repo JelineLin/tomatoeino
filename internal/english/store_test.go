@@ -225,6 +225,24 @@ func TestPublicLessonHidesAnswers(t *testing.T) {
 	}
 }
 
+func TestWithReadingReviewUsesSubmittedAnswers(t *testing.T) {
+	lesson := Lesson{Questions: []Question{
+		{ID: "q1", Answer: "A", Explain: "第一题解析"},
+		{ID: "q2", Answer: "C", Explain: "第二题解析"},
+	}}
+	attempt := ReadingAttempt{Answers: []Answer{
+		{QuestionID: "q1", Value: "a"},
+		{QuestionID: "q2", Value: "B"},
+	}}
+	got := WithReadingReview(attempt, lesson)
+	if len(got.Review) != 2 || !got.Review[0].IsCorrect || got.Review[1].IsCorrect {
+		t.Fatalf("逐题判断错误: %+v", got.Review)
+	}
+	if got.Review[1].CorrectAnswer != "C" || got.Review[1].Explanation != "第二题解析" {
+		t.Fatalf("正确答案或解析缺失: %+v", got.Review[1])
+	}
+}
+
 func TestNotificationCanOnlyBeClaimedOnce(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
