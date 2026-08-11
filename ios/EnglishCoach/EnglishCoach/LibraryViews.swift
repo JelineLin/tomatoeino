@@ -29,7 +29,7 @@ struct HistoryView: View {
                                 }
                                 Text(lesson.passage).font(.subheadline).foregroundStyle(.secondary).lineLimit(3)
                                 HStack {
-                                    Label("\(lesson.vocabulary.count) 词汇", systemImage: "character.book.closed")
+                                    Label("\(lesson.vocabulary.count) 短语/词汇", systemImage: "character.book.closed")
                                     Label("\(lesson.questions.count) 道题", systemImage: "checklist")
                                 }
                                 .font(.caption).foregroundStyle(.indigo)
@@ -85,12 +85,22 @@ struct LessonDetailView: View {
                 }
                 Text(lesson.passage).font(.body.leading(.loose)).textSelection(.enabled)
                 Divider()
-                Text("重点词汇").font(.headline)
+                Text("重点短语 + 词汇").font(.headline)
                 ForEach(lesson.vocabulary) { item in
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(item.word).fontWeight(.semibold).foregroundStyle(.indigo)
-                        Text(item.meaning)
-                        Text(item.example).font(.subheadline).foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(item.displayPhrase)
+                            .fontWeight(.semibold).foregroundStyle(.indigo)
+                        if let phraseMeaning = item.phraseMeaning, !phraseMeaning.isEmpty {
+                            Text(phraseMeaning)
+                        }
+                        HStack(alignment: .firstTextBaseline) {
+                            Text(item.word).font(.caption.bold()).foregroundStyle(.indigo)
+                            if let pronunciation = item.pronunciation, !pronunciation.isEmpty {
+                                Text(pronunciation).font(.caption).foregroundStyle(.secondary)
+                            }
+                            Text(item.meaning).font(.subheadline)
+                        }
+                        Text("例句：\(item.example)").font(.subheadline).foregroundStyle(.secondary)
                     }
                 }
             }.padding()

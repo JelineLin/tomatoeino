@@ -1,4 +1,4 @@
-export interface Vocabulary { word: string; meaning: string; example: string; pronunciation?: string }
+export interface Vocabulary { phrase?: string; phrase_meaning?: string; word: string; meaning: string; example: string; pronunciation?: string }
 export interface Question { id: string; type?: string; prompt: string; options: string[]; explanation?: string }
 export interface Lesson { id: number; date: string; title: string; passage: string; vocabulary: Vocabulary[]; questions: Question[]; difficulty: number; generation_reason: string; estimated_minutes: number; content_mode: string; exercise_style: string; syllabus_focus: string; source_name: string; source_title: string; source_url: string; source_published_at: string; adaptation_note: string }
 export interface ReadingAnswer { question_id: string; value: string }

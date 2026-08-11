@@ -99,17 +99,27 @@ struct TodayView: View {
 
     private func vocabulary(_ lesson: Lesson) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            Label("重点词汇", systemImage: "character.book.closed.fill").font(.headline)
+            Label("重点短语 + 词汇", systemImage: "character.book.closed.fill").font(.headline)
+            Text("先记可复用的搭配，再拆解其中的核心词")
+                .font(.caption).foregroundStyle(.secondary)
             ForEach(lesson.vocabulary) { item in
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(item.displayPhrase)
+                        .font(.headline).foregroundStyle(.indigo)
+                    if let phraseMeaning = item.phraseMeaning, !phraseMeaning.isEmpty {
+                        Text(phraseMeaning).font(.subheadline)
+                    }
                     HStack(alignment: .firstTextBaseline) {
-                        Text(item.word).font(.headline)
+                        Text(item.word)
+                            .font(.caption.bold()).foregroundStyle(.indigo)
+                            .padding(.horizontal, 9).padding(.vertical, 4)
+                            .background(Color.indigo.opacity(0.1), in: Capsule())
                         if let pronunciation = item.pronunciation, !pronunciation.isEmpty {
                             Text(pronunciation).font(.caption).foregroundStyle(.secondary)
                         }
+                        Text(item.meaning).font(.subheadline)
                     }
-                    Text(item.meaning)
-                    Text(item.example).font(.subheadline).foregroundStyle(.secondary)
+                    Text("例句：\(item.example)").font(.subheadline).foregroundStyle(.secondary)
                 }
                 if item.id != lesson.vocabulary.last?.id { Divider() }
             }

@@ -32,10 +32,12 @@ type Profile struct {
 }
 
 type Vocabulary struct {
-	Word      string `json:"word"`
-	Meaning   string `json:"meaning"`
-	Example   string `json:"example"`
-	Pronounce string `json:"pronunciation,omitempty"`
+	Phrase        string `json:"phrase,omitempty"`
+	PhraseMeaning string `json:"phrase_meaning,omitempty"`
+	Word          string `json:"word"`
+	Meaning       string `json:"meaning"`
+	Example       string `json:"example"`
+	Pronounce     string `json:"pronunciation,omitempty"`
 }
 
 type Question struct {
@@ -73,12 +75,61 @@ type Lesson struct {
 // PublicLesson 隐去题目答案和解析。正确答案只留在服务端账本中参与评分，不能像把
 // 支付签名密钥塞进响应一样，随题目一起下发给浏览器。
 func PublicLesson(l Lesson) Lesson {
+	l.Vocabulary = append([]Vocabulary(nil), l.Vocabulary...)
+	for i := range l.Vocabulary {
+		if strings.TrimSpace(l.Vocabulary[i].Phrase) == "" {
+			l.Vocabulary[i].Phrase = contextualPhrase(l.Vocabulary[i].Word, l.Vocabulary[i].Example, l.Passage)
+		}
+	}
 	l.Questions = append([]Question(nil), l.Questions...)
 	for i := range l.Questions {
 		l.Questions[i].Answer = ""
 		l.Questions[i].Explain = ""
 	}
 	return l
+}
+
+// contextualPhrase 为旧课程补一个包含目标词的短语片段。新课程由生成器直接给出
+// 高质量搭配；这里只做向后兼容，不重写已经落账的历史课程。
+func contextualPhrase(word string, contexts ...string) string {
+	word = strings.TrimSpace(word)
+	for _, context := range contexts {
+		fields := strings.Fields(context)
+		for i, field := range fields {
+			clean := strings.Trim(field, `.,;:!?"'()[]{} `)
+			if !legacyWordForm(clean, word) {
+				continue
+			}
+			start := i - 2
+			if start < 0 {
+				start = 0
+			}
+			end := i + 3
+			if end > len(fields) {
+				end = len(fields)
+			}
+			return strings.Join(fields[start:end], " ")
+		}
+	}
+	return word
+}
+
+func legacyWordForm(candidate, word string) bool {
+	candidate = strings.ToLower(candidate)
+	word = strings.ToLower(word)
+	if candidate == word {
+		return true
+	}
+	if strings.HasPrefix(candidate, word) {
+		switch candidate[len(word):] {
+		case "s", "es", "ed", "ing", "er", "ers":
+			return true
+		}
+	}
+	if strings.HasSuffix(word, "y") && len(word) > 1 && candidate == strings.TrimSuffix(word, "y")+"ies" {
+		return true
+	}
+	return false
 }
 
 type Answer struct {

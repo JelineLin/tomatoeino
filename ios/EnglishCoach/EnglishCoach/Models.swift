@@ -2,10 +2,21 @@ import Foundation
 
 struct VocabularyItem: Codable, Identifiable, Hashable {
     var id: String { word }
+    var displayPhrase: String {
+        guard let phrase, !phrase.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return word }
+        return phrase
+    }
+    let phrase: String?
+    let phraseMeaning: String?
     let word: String
     let meaning: String
     let example: String
     let pronunciation: String?
+
+    enum CodingKeys: String, CodingKey {
+        case phrase, word, meaning, example, pronunciation
+        case phraseMeaning = "phrase_meaning"
+    }
 }
 
 struct ReadingQuestion: Codable, Identifiable, Hashable {

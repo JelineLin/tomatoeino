@@ -116,13 +116,19 @@ export default function TodayPage() {
           </section>
 
           <section className="rounded-3xl bg-white p-5 shadow-sm">
-            <h3 className="mb-4 font-bold text-indigo-950">Key vocabulary</h3>
+            <h3 className="mb-1 font-bold text-indigo-950">重点短语 + 词汇</h3>
+            <p className="mb-4 text-xs text-slate-400">先记可复用的搭配，再拆解其中的核心词</p>
             <div className="space-y-4">
               {lesson.vocabulary.map((word) => (
                 <div key={word.word} className="border-b border-slate-100 pb-3 last:border-0">
-                  <div className="flex items-baseline gap-2"><strong className="text-indigo-700">{word.word}</strong><span className="text-xs text-slate-400">{word.pronunciation}</span></div>
-                  <p className="text-sm text-slate-700">{word.meaning}</p>
-                  <p className="mt-1 text-xs italic text-slate-400">{word.example}</p>
+                  <p className="text-[17px] font-semibold text-indigo-950"><HighlightedPhrase phrase={word.phrase || word.word} word={word.word} /></p>
+                  {word.phrase_meaning && <p className="mt-1 text-sm text-slate-600">{word.phrase_meaning}</p>}
+                  <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+                    <span className="rounded-full bg-indigo-50 px-2.5 py-1 font-semibold text-indigo-700">{word.word}</span>
+                    {word.pronunciation && <span className="text-slate-400">{word.pronunciation}</span>}
+                    <span className="text-slate-600">{word.meaning}</span>
+                  </div>
+                  <p className="mt-2 text-xs italic leading-5 text-slate-400">例句：{word.example}</p>
                 </div>
               ))}
             </div>
@@ -180,4 +186,10 @@ export default function TodayPage() {
       {error && <p className="mx-5 mt-4 rounded-xl bg-red-50 p-3 text-sm text-red-600">{error}</p>}
     </div>
   );
+}
+
+function HighlightedPhrase({ phrase, word }: { phrase: string; word: string }) {
+  const index = phrase.toLowerCase().indexOf(word.toLowerCase());
+  if (index < 0) return phrase;
+  return <>{phrase.slice(0, index)}<mark className="rounded bg-amber-100 px-0.5 text-indigo-950">{phrase.slice(index, index + word.length)}</mark>{phrase.slice(index + word.length)}</>;
 }
