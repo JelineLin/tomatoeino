@@ -4,10 +4,13 @@
 // 行为对齐 iOS ChatView：
 //   - thinking 事件进灰色可折叠区（流式期间自动展开，答案一出现自动收起）；
 //   - context（工具备忘）存在那条助手消息上，下一轮随历史带回（L1 回灌）；
-//   - session 钥匙只存内存，刷新丢了就全量重发自动降级（L2→L1 不断崖）。
+//   - session 钥匙 + 消息一起落 localStorage：切 tab / 刷新 / 关浏览器都能接上。
+//     切 tab 必须落盘——底部导航是 <Link>，路由一变本页组件就被卸载重建，
+//     存在组件里的东西全没（iOS 的 TabView 会留住页面，所以只有网页版会犯）。
+//     钥匙过期也不怕：后端命不中就用一并存下的全量消息走 L1 重建。
 import { useEffect, useRef, useState } from "react";
 import Markdown from "react-markdown";
-import { streamChat, type ChatMessage } from "@/lib/api";
+import { streamChat, loadChatState, saveChatState, type ChatMessage } from "@/lib/api";
 
 interface Bubble extends ChatMessage {
   id: number;
@@ -28,6 +31,34 @@ export default function ChatPage() {
   const sessionID = useRef("");
   const nextID = useRef(1);
   const bottomRef = useRef<HTMLDivElement>(null);
+  // 水合完成前不回存，否则首帧那个空数组会把存好的对话覆盖掉。
+  // 必须用 state 而不是 ref：同一个 commit 里 effect 按声明顺序跑，
+  // 水合那个先把 ref 置 true，回存那个紧接着就以为可以存了——可它闭包里的
+  // messages 还是挂载时的空数组，一存就把刚捞回来的对话抹了。
+  // 换成 state 后，回存 effect 首次运行读到的是初始值 false，老实跳过；
+  // 等 setRestored 触发重渲染，那一轮的 messages 才是恢复后的。
+  const [restored, setRestored] = useState(false);
+
+  // 进页面先从 localStorage 捞回上次的对话。放 useEffect 而不是 useState 初始值：
+  // 静态导出会预渲染这个组件，构建时没有 window，直接读会炸。
+  useEffect(() => {
+    const saved = loadChatState<Bubble>();
+    if (saved) {
+      sessionID.current = saved.sessionID;
+      if (saved.messages.length > 0) {
+        setMessages(saved.messages);
+        // 气泡 id 是自增的，接着最大值往后发，免得和捞回来的撞号。
+        nextID.current = Math.max(...saved.messages.map((m) => m.id)) + 1;
+      }
+    }
+    setRestored(true);
+  }, []);
+
+  // 消息一变就回存。sessionID 是 ref 不触发渲染，跟着这里搭车存下去即可。
+  useEffect(() => {
+    if (!restored) return;
+    saveChatState(sessionID.current, messages);
+  }, [messages, restored]);
 
   // 任何内容增量都跟着滚到底（打字机的「跟手感」）。
   useEffect(() => {
@@ -79,6 +110,13 @@ export default function ChatPage() {
       patch((m) => ({ ...m, content: m.content + `\n⚠️ ${e instanceof Error ? e.message : e}` }));
     } finally {
       setSending(false);
+      // 显式再存一次：会话钥匙是流【末尾】才到的，而它存在 ref 里不触发上面那个
+      // 跟着 messages 走的回存。漏了这一下，切个 tab 回来钥匙就丢了——
+      // 虽然还能靠 L1 全量重发续上，但每轮都要重灌历史，白烧 token。
+      setMessages((prev) => {
+        saveChatState(sessionID.current, prev);
+        return prev;
+      });
     }
   }
 

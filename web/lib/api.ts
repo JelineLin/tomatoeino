@@ -11,10 +11,17 @@ export interface Feedback {
   note?: string;
 }
 
+// IngredientUse 是「这道菜用掉哪样库存、用掉多少」。不带单位——单位以账本为准。
+export interface IngredientUse {
+  name: string;
+  qty: number;
+}
+
 export interface Dish {
   name: string;
   detail: string;
   feedback?: Feedback | null; // 菜级反馈；旧数据缺字段
+  uses?: IngredientUse[]; // 推荐时登记的库存消耗；历史里的旧菜没有
 }
 
 export interface Meal {
@@ -56,23 +63,72 @@ export interface Profile {
   rules?: PrefRule[]; // 只读派生：后端归纳的偏好规律
 }
 
+// 后端在 GET/写后响应里一并下发新鲜度（派生字段，服务端现算不落盘），
+// 且已按「越该吃越靠前」排好序——前端照序渲染就是家长最该先处理的顺序。
+// 新鲜度字段全部可选：旧后端不发时不该让库存页崩掉。
 export interface InventoryItem {
   name: string;
   quantity: number;
   unit: string;
+  updatedAt?: string; // 最近一次补货时刻（RFC3339）
+  freshness?: "fresh" | "use_soon" | "stale" | "unknown";
+  days?: number; // 放了几天；-1 = 不详
+  shelfLife?: number; // 这个品类的保鲜期（天）
+  category?: string;
+}
+
+// 新鲜度徽章：只有「该吃了」和「可能没了」值得占用视觉——全都标一遍等于没标。
+export function freshnessBadge(it: InventoryItem): { text: string; urgent: boolean } | null {
+  if (it.freshness === "use_soon") {
+    return { text: it.days != null && it.days >= 0 ? `该吃了 · ${it.days}天` : "该吃了", urgent: false };
+  }
+  if (it.freshness === "stale") {
+    return { text: it.days != null && it.days >= 0 ? `可能没了 · ${it.days}天` : "可能没了", urgent: true };
+  }
+  return null;
 }
 
 export interface EditDish {
   name: string;
   detail: string;
+  // 这道菜吃掉的库存。采纳时原样回传给后端 → 自动出库。
+  // 换备选菜时整个 EditDish 被替换，uses 跟着换，不用单独同步。
+  uses?: IngredientUse[];
 }
 
 export interface ProposedMeal {
   meal: string; // lunch/fruit/dinner
   time: string;
   dishes: EditDish[];
+  // 备选菜（后端约定每餐 2 道）：家长不满意主推时直接顶替，零请求零延迟。
+  // 旧后端缺字段 → undefined，前端据此不显示换菜入口。
+  alternatives?: EditDish[];
   reason: string;
   applied?: boolean;
+}
+
+// ConsumedItem 是采纳一餐后自动出库的一条结果，用来提示家长「刚扣了什么」。
+export interface ConsumedItem {
+  name: string;
+  qty: number;
+  unit: string;
+  remaining: number;
+  depleted: boolean;
+}
+
+// ReplaceDishResult 是 /api/brief/dish 的响应：新菜 + 换完的整份菜单 + agent 的一句说明。
+// 直接用 menu 替换本地状态——服务端已经把简报缓存改好了，两边保持一致。
+export interface ReplaceDishResult {
+  dish: EditDish;
+  menu: RecommendedMenu | null;
+  note: string;
+}
+
+// ApplyResult 是 /api/history/apply 的响应：新历史 + 这次自动扣了什么。
+export interface ApplyResult {
+  history: Day[];
+  consumed?: ConsumedItem[];
+  missed?: string[];
 }
 
 export interface RecommendedMenu {
@@ -102,6 +158,61 @@ export function setToken(t: string) {
 
 export function clearToken() {
   localStorage.removeItem(TOKEN_KEY);
+  clearChatState(); // 换家庭/掉线回门口时，上一个人的对话不该留在这台机器上
+}
+
+// ---- 聊天状态持久化 ----
+//
+// 网页版和 iOS 的结构差异：底部导航是 Next 的 <Link>，切到「推荐」再切回来，
+// 聊天页组件会被【卸载重建】——存在组件里的消息和会话钥匙一起归零，
+// 于是每次切 tab 回来 agent 都像第一次见到你。iOS 没这毛病是因为 TabView
+// 把页面留在内存里。修法：把这两样落到 localStorage，和 token 同一套路。
+//
+// 会话钥匙存下来是安全的：服务端会话有 30 分钟 TTL，过期后这把钥匙命不中，
+// 后端自动退回 L1 用我们一并存下的全量消息重建上下文——过期只是少省点 token，
+// 对话不会断。
+
+const CHAT_KEY = "menuagent_chat";
+
+// 只留最近 N 条气泡。localStorage 有约 5MB 上限，而思考过程很占地方；
+// 家庭场景翻不到那么早的对话，超出的直接丢。
+const CHAT_MAX_BUBBLES = 40;
+
+export interface PersistedChat<T> {
+  sessionID: string;
+  messages: T[];
+}
+
+export function loadChatState<T>(): PersistedChat<T> | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = localStorage.getItem(CHAT_KEY);
+    if (!raw) return null;
+    const v = JSON.parse(raw) as PersistedChat<T>;
+    if (!Array.isArray(v?.messages)) return null;
+    return { sessionID: typeof v.sessionID === "string" ? v.sessionID : "", messages: v.messages };
+  } catch {
+    return null; // 存坏了就当没有，不能让一条脏数据把聊天页整个打不开
+  }
+}
+
+export function saveChatState<T>(sessionID: string, messages: T[]) {
+  if (typeof window === "undefined") return;
+  try {
+    const trimmed = messages.slice(-CHAT_MAX_BUBBLES);
+    localStorage.setItem(CHAT_KEY, JSON.stringify({ sessionID, messages: trimmed }));
+  } catch {
+    // 写满了/隐私模式禁写：放弃持久化即可，内存里的对话照常进行
+  }
+}
+
+export function clearChatState() {
+  if (typeof window === "undefined") return;
+  try {
+    localStorage.removeItem(CHAT_KEY);
+  } catch {
+    /* 忽略 */
+  }
 }
 
 // 401 时通知外壳「回到输码门」。用事件而不是状态库——这个 app 不值得引状态库。
@@ -158,16 +269,30 @@ export const api = {
   inventory: () => getJSON<InventoryItem[]>("/api/inventory"),
   inventoryWrite: (op: "add" | "set" | "remove", name: string, quantity: number, unit: string) =>
     postJSON<InventoryItem[]>("/api/inventory", { op, name, quantity, unit }),
+  // 批量入库：一句话/一张订单解析出来的通常是好几样，逐条发请求会在中途失败时
+  // 留下「入了一半」的账。后端 add_batch 先全校验再全写入。
+  inventoryAddBatch: (items: InventoryItem[]) =>
+    postJSON<InventoryItem[]>("/api/inventory", { op: "add_batch", items }),
 
   brief: (refresh = false) =>
     getJSON<DailyBrief>(`/api/brief${refresh ? "?refresh=1" : ""}`),
 
+  // 只换某一餐的第 dishIndex 道菜，其余原样。「调整菜单」的第二级——
+  // 备选菜（零请求）是第一级，两道都不满意才落到这里；再不行才是整份重生成。
+  replaceDish: (meal: string, dishIndex: number, instruction = "") =>
+    postJSON<ReplaceDishResult>("/api/brief/dish", { meal, dishIndex, instruction }),
+
+  // 返回值除了新历史还带「这次自动扣了什么库存」——采纳即出库，但扣了什么
+  // 必须当场说清楚，不然就是背着人改账本。
   applyMeal: (date: string, meal: string, time: string, dishes: EditDish[]) =>
-    postJSON<Day[]>("/api/history/apply", { date, meal, time, dishes }),
+    postJSON<ApplyResult>("/api/history/apply", { date, meal, time, dishes }),
 
   parseOrderImage: (imageBase64: string, mime: string) =>
-    postJSON<{ name: string; quantity: number; unit: string }[]>(
+    postJSON<InventoryItem[]>(
       "/api/inventory/parse-image", { image_base64: imageBase64, mime }),
+  // 一句话入库：家长打/说一句「买了两块鳕鱼、一个西兰花」，后端解析成条目（不入库）。
+  parseInventoryText: (text: string) =>
+    postJSON<InventoryItem[]>("/api/inventory/parse-text", { text }),
 
   parseHistoryText: (text: string) =>
     postJSON<Day[]>("/api/history/parse", { text }),
