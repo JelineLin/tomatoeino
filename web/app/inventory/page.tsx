@@ -5,7 +5,7 @@
 //   - 扫订单是 解析→预览可改→确认 三步，视觉解析不可靠，绝不静默入库；
 //   - 确认入库逐条调 add，【累计失败项】最后一起报——不让后面的成功把前面的失败冲没。
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, type InventoryItem } from "@/lib/api";
+import { api, freshnessBadge, type InventoryItem } from "@/lib/api";
 import { compressForUpload } from "@/lib/image";
 
 // 份数渲染：整数不带小数点（2），小数保留（0.5）。和后端 fmtQty 一个口径。
@@ -25,6 +25,7 @@ export default function InventoryPage() {
   const [adding, setAdding] = useState(false);
   const [parsing, setParsing] = useState(false);
   const [parsed, setParsed] = useState<ParsedItem[] | null>(null); // 非 null = 预览确认中
+  const [quickAdding, setQuickAdding] = useState(false); // 一句话入库弹层
   const fileRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
@@ -69,18 +70,42 @@ export default function InventoryPage() {
     }
   }
 
-  // 确认入库：逐条 add，累计失败最后一起报（对齐 iOS addAll）。
-  async function confirmParsed(list: ParsedItem[]) {
-    const failed: string[] = [];
-    for (const it of list) {
-      try {
-        setItems(await api.inventoryWrite("add", it.name, it.quantity, it.unit));
-      } catch {
-        failed.push(it.name);
+  // 一句话入库：家长打一句「买了两块鳕鱼、一个西兰花」，解析成条目（不入库），
+  // 汇到和扫订单同一个确认页——不管来源是图还是话，进账前都要过一遍家长的眼睛。
+  //
+  // 这条路存在的理由：入库原本只有截图那一条，要切到买菜 App、截图、回来上传、
+  // 等视觉模型，末了相册里还多一张再也不会看的图。摩擦全堆在入库这一端，
+  // 家长自然就不记了——账本失准的根不在算法，在这儿。
+  async function onParseText(text: string) {
+    setParsing(true);
+    setError("");
+    try {
+      const list = await api.parseInventoryText(text);
+      if (list.length === 0) {
+        setError("没从这句话里识别到食材，换个说法试试");
+        return false;
       }
+      setParsed(list);
+      return true;
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      return false;
+    } finally {
+      setParsing(false);
     }
+  }
+
+  // 确认入库：走后端 add_batch【一次性】写入。
+  // 原来是逐条 add + 累计失败项，问题是中途失败会留下「入了一半」的账，
+  // 而家长在确认页看到的是完整一批，回头对不上。
+  async function confirmParsed(list: ParsedItem[]) {
     setParsed(null);
-    setError(failed.length ? `有 ${failed.length} 项没入库：${failed.join("、")}，可手动再加` : "");
+    try {
+      setItems(await api.inventoryAddBatch(list));
+      setError("");
+    } catch (e) {
+      setError(`入库失败：${e instanceof Error ? e.message : String(e)}`);
+    }
   }
 
   return (
@@ -88,6 +113,10 @@ export default function InventoryPage() {
       <header className="flex shrink-0 items-center justify-between border-b border-stone-200 bg-white px-4 py-3">
         <span className="font-semibold">家庭库存</span>
         <div className="flex gap-3 text-sm">
+          {/* 一句话入库排在最前是有意的：它是入库的主路径，截图那条摩擦大得多。 */}
+          <button onClick={() => setQuickAdding(true)} className="text-orange-500 active:scale-95">
+            💬 一句话
+          </button>
           <button onClick={() => fileRef.current?.click()} className="text-orange-500 active:scale-95">
             🧾 扫订单
           </button>
@@ -131,6 +160,16 @@ export default function InventoryPage() {
                   <span className="ml-2 tabular-nums text-sm text-stone-500">
                     {fmtQty(it.quantity)} {it.unit}
                   </span>
+                  {/* 新鲜度徽章：只标「该吃了」和「可能没了」——全都标一遍等于没标。
+                      后端已按紧急度排序，所以要处理的东西天然聚在列表顶部。 */}
+                  {(() => {
+                    const badge = freshnessBadge(it);
+                    return badge ? (
+                      <span className={`ml-2 text-xs ${badge.urgent ? "text-red-500" : "text-orange-500"}`}>
+                        {badge.text}
+                      </span>
+                    ) : null;
+                  })()}
                 </button>
                 <button
                   onClick={() => write("remove", it.name, 0, "")}
@@ -151,7 +190,8 @@ export default function InventoryPage() {
       {parsing && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/20">
           <div className="rounded-2xl bg-white px-6 py-5 text-sm text-stone-600 shadow-lg">
-            正在识别订单…
+            {/* 订单截图和一句话共用这个遮罩，文案别写死成「订单」。 */}
+            正在识别…
           </div>
         </div>
       )}
@@ -168,6 +208,18 @@ export default function InventoryPage() {
         />
       )}
 
+      {quickAdding && (
+        <QuickAddSheet
+          busy={parsing}
+          onParse={async (text) => {
+            const ok = await onParseText(text);
+            if (ok) setQuickAdding(false); // 解析成功就让位给确认页
+            return ok;
+          }}
+          onClose={() => setQuickAdding(false)}
+        />
+      )}
+
       {parsed && (
         <ParsedOrderSheet
           initial={parsed}
@@ -175,6 +227,59 @@ export default function InventoryPage() {
           onClose={() => setParsed(null)}
         />
       )}
+    </div>
+  );
+}
+
+// 一句话入库弹层：打一句买了什么，交给后端解析成条目，再走和扫订单同一个确认页。
+// 网页端没有 iOS 那个原生语音输入，但手机键盘自带的听写按钮同样能往输入框里说话。
+function QuickAddSheet({
+  busy,
+  onParse,
+  onClose,
+}: {
+  busy: boolean;
+  onParse: (text: string) => Promise<boolean>;
+  onClose: () => void;
+}) {
+  const [text, setText] = useState("");
+  const trimmed = text.trim();
+
+  return (
+    <div className="fixed inset-0 z-20 flex items-end bg-black/30" onClick={onClose}>
+      <div
+        className="w-full rounded-t-3xl bg-white p-4 pb-6"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="mb-1 font-semibold">一句话入库</div>
+        <div className="mb-3 text-xs text-stone-500">
+          说说买了什么，比如「买了两块鳕鱼、一个西兰花、一盒鸡蛋」
+        </div>
+        <textarea
+          autoFocus
+          rows={3}
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder="买了…"
+          disabled={busy}
+          className="w-full resize-none rounded-xl border border-stone-300 px-3 py-2 text-[15px] outline-none focus:border-orange-400"
+        />
+        <div className="mt-3 flex gap-2">
+          <button
+            onClick={onClose}
+            className="flex-1 rounded-xl border border-stone-300 py-2.5 text-sm text-stone-600 active:scale-95"
+          >
+            取消
+          </button>
+          <button
+            disabled={busy || trimmed === ""}
+            onClick={() => onParse(trimmed)}
+            className="flex-1 rounded-xl bg-orange-500 py-2.5 text-sm text-white active:scale-95 disabled:opacity-50"
+          >
+            {busy ? "识别中…" : "识别"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

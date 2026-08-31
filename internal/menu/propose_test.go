@@ -23,7 +23,7 @@ func TestProposeMenu_RejectsNonISODate(t *testing.T) {
 	for _, bad := range []string{"今天", "2026/07/09", "", "2026-13-40"} {
 		msg, menu := callProposeMenu(t, proposeMenuInput{
 			Date:  bad,
-			Meals: []proposedMealIn{{Meal: "lunch", Dishes: []dishInput{{Name: "面"}}}},
+			Meals: []proposedMealIn{{Meal: "lunch", Dishes: []proposedDishIn{{Name: "面"}}}},
 		})
 		if menu != nil {
 			t.Errorf("日期 %q 非法时不该登记菜单，却拿到 %+v", bad, menu)
@@ -39,9 +39,9 @@ func TestProposeMenu_DedupsMealField(t *testing.T) {
 	_, menu := callProposeMenu(t, proposeMenuInput{
 		Date: "2026-07-09",
 		Meals: []proposedMealIn{
-			{Meal: "dinner", Dishes: []dishInput{{Name: "鳕鱼羹"}}},
-			{Meal: "dinner", Dishes: []dishInput{{Name: "冬瓜汤"}}}, // 重复餐别，应被跳过
-			{Meal: "lunch", Dishes: []dishInput{{Name: "丝瓜软饭"}}},
+			{Meal: "dinner", Dishes: []proposedDishIn{{Name: "鳕鱼羹"}}},
+			{Meal: "dinner", Dishes: []proposedDishIn{{Name: "冬瓜汤"}}}, // 重复餐别，应被跳过
+			{Meal: "lunch", Dishes: []proposedDishIn{{Name: "丝瓜软饭"}}},
 		},
 	})
 	if menu == nil {
@@ -66,12 +66,97 @@ func TestProposeMenu_DedupsMealField(t *testing.T) {
 func TestProposeMenu_NoSinkDoesNotClaimCard(t *testing.T) {
 	msg, err := makeProposeMenu()(context.Background(), proposeMenuInput{
 		Date:  "2026-07-09",
-		Meals: []proposedMealIn{{Meal: "lunch", Dishes: []dishInput{{Name: "面"}}}},
+		Meals: []proposedMealIn{{Meal: "lunch", Dishes: []proposedDishIn{{Name: "面"}}}},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(msg, "可编辑卡片") && !strings.Contains(msg, "无法") {
 		t.Errorf("无 sink 时不该承诺有可编辑卡片，实际：%s", msg)
+	}
+}
+
+// 备选菜要原样登记下来——它是「换菜」的全部依据，丢了前端就只能回头再问一次模型。
+func TestProposeMenu_KeepsAlternatives(t *testing.T) {
+	_, m := callProposeMenu(t, proposeMenuInput{
+		Date: "2026-07-09",
+		Meals: []proposedMealIn{{
+			Meal:   "lunch",
+			Dishes: []proposedDishIn{{Name: "丝瓜软饭"}},
+			Alternatives: []proposedDishIn{
+				{Name: "冬瓜虾仁面", Detail: "一小碗"},
+				{Name: "番茄鸡蛋疙瘩汤"},
+				{Name: ""}, // 空名应被丢掉，不占备选位
+			},
+		}},
+	})
+	if m == nil {
+		t.Fatal("有效输入却没登记菜单")
+	}
+	alts := m.Meals[0].Alternatives
+	if len(alts) != 2 {
+		t.Fatalf("空名备选应被丢弃后剩 2 道，实际 %d 道：%+v", len(alts), alts)
+	}
+	if alts[0].Name != "冬瓜虾仁面" || alts[0].Detail != "一小碗" {
+		t.Errorf("备选内容串了：%+v", alts[0])
+	}
+}
+
+// 模型漏填备选不该让整餐作废——主推是好的就得留下，前端拿到空数组不显示切换入口即可。
+func TestProposeMenu_MissingAlternativesStillRegisters(t *testing.T) {
+	_, m := callProposeMenu(t, proposeMenuInput{
+		Date:  "2026-07-09",
+		Meals: []proposedMealIn{{Meal: "dinner", Dishes: []proposedDishIn{{Name: "鳕鱼羹"}}}},
+	})
+	if m == nil || len(m.Meals) != 1 {
+		t.Fatalf("漏填备选时应照常登记，实际 %+v", m)
+	}
+	if len(m.Meals[0].Alternatives) != 0 {
+		t.Errorf("没给备选时应为空，实际 %+v", m.Meals[0].Alternatives)
+	}
+}
+
+// uses 是自动出库的依据：份数非正的格子必须丢掉——宁可少扣一样，也不能把账扣错。
+func TestProposeMenu_DropsInvalidUses(t *testing.T) {
+	_, m := callProposeMenu(t, proposeMenuInput{
+		Date: "2026-07-09",
+		Meals: []proposedMealIn{{
+			Meal: "dinner",
+			Dishes: []proposedDishIn{{
+				Name: "鳕鱼羹",
+				Uses: []ingredientUseIn{
+					{Name: "鳕鱼", Qty: 1},
+					{Name: "西兰花", Qty: 0},  // 份数为 0，丢
+					{Name: "  ", Qty: 2},    // 空名，丢
+					{Name: "胡萝卜", Qty: -1}, // 负数，丢
+				},
+			}},
+		}},
+	})
+	if m == nil {
+		t.Fatal("有效输入却没登记菜单")
+	}
+	uses := m.Meals[0].Dishes[0].Uses
+	if len(uses) != 1 || uses[0].Name != "鳕鱼" || uses[0].Qty != 1 {
+		t.Errorf("只该留下鳕鱼 1 份，实际 %+v", uses)
+	}
+}
+
+// 一餐里两道菜都用到同一样食材时必须累加——分开扣会因为「扣完第一次就出清」而少扣。
+func TestMergeUses_SumsSameIngredient(t *testing.T) {
+	merged := MergeUses([]Dish{
+		{Name: "西兰花泥", Uses: []IngredientUse{{Name: "西兰花", Qty: 0.5}}},
+		{Name: "杂蔬软饭", Uses: []IngredientUse{{Name: "西兰花", Qty: 0.5}, {Name: "胡萝卜", Qty: 1}}},
+		{Name: "白灼菜心"}, // 没有 uses，不该影响合并
+	})
+	got := map[string]float64{}
+	for _, u := range merged {
+		got[u.Name] = u.Qty
+	}
+	if got["西兰花"] != 1 {
+		t.Errorf("西兰花应合并成 1 份，实际 %v", got["西兰花"])
+	}
+	if got["胡萝卜"] != 1 || len(merged) != 2 {
+		t.Errorf("合并结果不对：%+v", merged)
 	}
 }

@@ -26,10 +26,13 @@ struct MealEditorSheet: View {
     }
 
     // 去空白、丢掉空菜名的菜品——保存前清洗一遍。
+    // uses 必须原样带过去：这条路（编辑并采纳）正是自动扣库存的主入口，
+    // 清洗时把它丢了，扣减就整个失效，而且还是静默失效——最难发现的那种坏法。
     private var cleanedDishes: [EditDish] {
         dishes
             .map { EditDish(name: $0.name.trimmingCharacters(in: .whitespacesAndNewlines),
-                            detail: $0.detail.trimmingCharacters(in: .whitespacesAndNewlines)) }
+                            detail: $0.detail.trimmingCharacters(in: .whitespacesAndNewlines),
+                            uses: $0.uses) }
             .filter { !$0.name.isEmpty }
     }
 

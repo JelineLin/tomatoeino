@@ -19,16 +19,26 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
-// InventoryItem 是账本里的一条：某样食材现有多少份。
+// InventoryItem 是账本里的一条：某样食材现有多少份、什么时候进的账。
 type InventoryItem struct {
 	Name     string  `json:"name"`
 	Quantity float64 `json:"quantity"`
 	Unit     string  `json:"unit"` // 计量单位，默认「份」
+	// UpdatedAt 是最近一次【补货】的时刻（RFC3339）。入库/改数刷新，出库不刷新——
+	// 它回答的是「这东西是什么时候买的」，吃掉一半不会让剩下那半变新鲜。
+	//
+	// 这个字段是库存真正的价值所在：份数永远不准（谁也不会记半根黄瓜），
+	// 但「几天前买的」是系统自己就能记准、家长完全不用维护的事实。
+	// 有了它，库存从「账本」变成「线索」——见 freshness.go。
+	// omitempty + 空值容忍：旧账本没有这个字段，读出来是 unknown 档，不猜。
+	UpdatedAt string `json:"updatedAt,omitempty"`
 }
 
 // InventoryStore 是带锁、带落盘的库存账本。
@@ -37,11 +47,14 @@ type InventoryStore struct {
 	mu    sync.Mutex
 	path  string
 	items []InventoryItem
+	// now 是可注入的时钟，只为让新鲜度相关的测试能造出「三天前买的」这种状态。
+	// 生产路径永远是 time.Now（NewInventoryStore 里装配）。
+	now func() time.Time
 }
 
 // NewInventoryStore 打开（或新建）账本。文件不存在不算错——空账本，第一次入库时落盘。
 func NewInventoryStore(path string) (*InventoryStore, error) {
-	s := &InventoryStore{path: path}
+	s := &InventoryStore{path: path, now: time.Now}
 	raw, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return s, nil
@@ -68,6 +81,54 @@ func (s *InventoryStore) List(keyword string) []InventoryItem {
 	return out
 }
 
+// FreshInventoryItem 是一条库存 + 它的时间维度。派生数据，不落盘——
+// 保鲜期表随时可能调整，存下来就成了要迁移的历史包袱；现算一遍成本约等于零。
+type FreshInventoryItem struct {
+	InventoryItem
+	Freshness Freshness `json:"freshness"` // fresh / use_soon / stale / unknown
+	Days      int       `json:"days"`      // 放了几天；-1 = 不详
+	ShelfLife int       `json:"shelfLife"` // 这个品类的保鲜期（天），给界面显示进度用
+	Category  string    `json:"category"`  // 判定用的品类，空串 = 没匹配到、按默认值算
+}
+
+// ListFresh 列出库存并带上新鲜度。排序刻意是【越该吃的越靠前】：
+// stale → use_soon → fresh → unknown，同档内放得久的在前。
+// 界面和模型拿到的第一眼就是「最该处理的东西」，而不是入库顺序这种和决策无关的次序。
+func (s *InventoryStore) ListFresh(keyword string) []FreshInventoryItem {
+	items := s.List(keyword) // 复用已有的锁和过滤，不重复实现
+	now := s.now()
+	out := make([]FreshInventoryItem, 0, len(items))
+	for _, it := range items {
+		f, days := FreshnessOf(it, now)
+		life, cat := classify(it.Name)
+		out = append(out, FreshInventoryItem{
+			InventoryItem: it, Freshness: f, Days: days, ShelfLife: life, Category: cat,
+		})
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		pi, pj := freshnessRank(out[i].Freshness), freshnessRank(out[j].Freshness)
+		if pi != pj {
+			return pi < pj
+		}
+		return out[i].Days > out[j].Days
+	})
+	return out
+}
+
+// freshnessRank 决定排序优先级，数字越小越靠前。
+func freshnessRank(f Freshness) int {
+	switch f {
+	case FreshnessStale:
+		return 0
+	case FreshnessUseSoon:
+		return 1
+	case FreshnessFresh:
+		return 2
+	default: // unknown 垫底：没有时间信息的东西不该抢占注意力
+		return 3
+	}
+}
+
 // Add 入库：同名累加份数（充值语义），新名字追加一条。unit 传空则沿用已有/默认「份」。
 // 返回入库后的最新条目。
 func (s *InventoryStore) Add(name string, qty float64, unit string) (InventoryItem, error) {
@@ -87,15 +148,23 @@ func (s *InventoryStore) Add(name string, qty float64, unit string) (InventoryIt
 			if unit != "" {
 				s.items[i].Unit = unit
 			}
+			// 补货刷新时间戳：又买了一份，这样东西就该按「今天买的」算。
+			s.items[i].UpdatedAt = s.stamp()
 			return s.items[i], s.save()
 		}
 	}
 	if unit == "" {
 		unit = "份"
 	}
-	it := InventoryItem{Name: name, Quantity: qty, Unit: unit}
+	it := InventoryItem{Name: name, Quantity: qty, Unit: unit, UpdatedAt: s.stamp()}
 	s.items = append(s.items, it)
 	return it, s.save()
+}
+
+// stamp 取当前时刻的 RFC3339 串。截断到秒——库存的时间精度到天就够了，
+// 纳秒只会让 JSON 更难读。调用方必须已持有锁（now 本身无状态，但用法上跟着写路径走）。
+func (s *InventoryStore) stamp() string {
+	return s.now().Truncate(time.Second).Format(time.RFC3339)
 }
 
 // Consume 出库：按名称找到条目扣减份数。
@@ -155,6 +224,45 @@ func (s *InventoryStore) Consume(name string, qty float64) (InventoryItem, bool,
 	return *it, false, s.save()
 }
 
+// ConsumedItem 是一条出库结果，回给前端做提示（「西兰花用掉 1 份，还剩 0.5 份」）。
+type ConsumedItem struct {
+	Name      string  `json:"name"`      // 账本里的真实名字（可能和请求的略有出入——Consume 允许子串匹配）
+	Qty       float64 `json:"qty"`       // 这次扣了多少份
+	Unit      string  `json:"unit"`      // 账本单位
+	Remaining float64 `json:"remaining"` // 扣完还剩多少
+	Depleted  bool    `json:"depleted"`  // 扣完出清（不够扣也算——账上归零，不记负数）
+}
+
+// ConsumeAll 按一张出库清单批量扣减，返回扣成的条目和没扣成的名字。
+//
+// 单条扣不动【不算错】，只记进 missed 继续往下走。理由：库存在这个系统里是「线索」
+// 而不是「账本」——家长采纳一餐是主行为，扣库存是副作用，绝不能因为账上没那样东西
+// （模型写错名字、家长手动删过、上次早就扣光）反过来让采纳失败。
+//
+// 逐条走 Consume 而不是自己遍历：宽松匹配（精确→子串→歧义报错）和「不够扣就出清、
+// 不记负数」的语义只在 Consume 里写一遍，这里不复制。
+func (s *InventoryStore) ConsumeAll(uses []IngredientUse) (consumed []ConsumedItem, missed []string) {
+	for _, u := range uses {
+		name := strings.TrimSpace(u.Name)
+		if name == "" || u.Qty <= 0 {
+			continue
+		}
+		it, depleted, err := s.Consume(name, u.Qty)
+		if err != nil {
+			missed = append(missed, name)
+			continue
+		}
+		consumed = append(consumed, ConsumedItem{
+			Name:      it.Name,
+			Qty:       u.Qty,
+			Unit:      it.Unit,
+			Remaining: it.Quantity,
+			Depleted:  depleted,
+		})
+	}
+	return consumed, missed
+}
+
 // Set 把某样食材设为【精确份数】（界面编辑用，区别于 Add 的累加充值）。
 // name 不存在则新增一条。qty 必须 > 0——要删除整条走 Remove，别用 Set 0。
 // unit 传空则沿用已有/默认「份」。返回设置后的条目。
@@ -175,13 +283,16 @@ func (s *InventoryStore) Set(name string, qty float64, unit string) (InventoryIt
 			if unit != "" {
 				s.items[i].Unit = unit
 			}
+			// 界面上手改份数也刷新时间戳：家长愿意去数一遍，说明他刚看过冰箱，
+			// 这个数字此刻是可信的——比几天前那次入库更值得当作「最新观测」。
+			s.items[i].UpdatedAt = s.stamp()
 			return s.items[i], s.save()
 		}
 	}
 	if unit == "" {
 		unit = "份"
 	}
-	it := InventoryItem{Name: name, Quantity: qty, Unit: unit}
+	it := InventoryItem{Name: name, Quantity: qty, Unit: unit, UpdatedAt: s.stamp()}
 	s.items = append(s.items, it)
 	return it, s.save()
 }

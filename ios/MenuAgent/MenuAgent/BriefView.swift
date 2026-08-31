@@ -16,6 +16,8 @@ final class BriefViewModel: ObservableObject {
     // 采纳（应用推荐入库）相关：
     @Published var appliedMeals: Set<String> = []  // 本份简报里已采纳入库的餐（lunch/fruit/dinner）
     @Published var applyError: String?             // 采纳失败（弹 alert，不动简报）
+    // 采纳后自动扣掉的库存，用于给家长一条明示（出库是他没点过的副作用，不说等于偷改账本）。
+    @Published var consumedNotice: String?
 
     private let api = APIClient()
 
@@ -58,8 +60,9 @@ final class BriefViewModel: ObservableObject {
     // 失败走 applyError（弹 alert），不碰简报显示。
     func applyMeal(date: String, field: String, time: String, dishes: [EditDish]) async {
         applyError = nil
+        consumedNotice = nil
         do {
-            _ = try await api.applyMeal(date: date, meal: field, time: time, dishes: dishes)
+            let result = try await api.applyMeal(date: date, meal: field, time: time, dishes: dishes)
             appliedMeals.insert(field)
             if var menu = brief?.menu, let i = menu.meals.firstIndex(where: { $0.meal == field }) {
                 menu.meals[i].time = time
@@ -67,9 +70,68 @@ final class BriefViewModel: ObservableObject {
                 menu.meals[i].applied = true
                 brief?.menu = menu
             }
+            consumedNotice = Self.describeConsumed(result)
         } catch {
             applyError = error.localizedDescription
         }
+    }
+
+    // describeConsumed 把出库结果排成一句人话；没扣到任何东西就返回 nil（不弹空提示）。
+    // 「用完了」单独点出来：那是家长下次买菜要补的东西，比剩多少更值得看见。
+    private static func describeConsumed(_ result: ApplyResult) -> String? {
+        let consumed = result.consumed ?? []
+        guard !consumed.isEmpty else { return nil }
+        let parts = consumed.map { item -> String in
+            let qty = fmtQty(item.qty)
+            return item.depleted ? "\(item.name) \(qty)\(item.unit)（用完了）" : "\(item.name) \(qty)\(item.unit)"
+        }
+        return "已扣减库存：" + parts.joined(separator: "、")
+    }
+
+    // fmtQty 渲染份数：整数不带小数点（2 而不是 2.0），半份保留 0.5。
+    private static func fmtQty(_ q: Double) -> String {
+        q == q.rounded() ? String(Int(q)) : String(q)
+    }
+
+    // replacingDish 标记「哪道菜正在重算」（"lunch-0" 这种键），用来只转那一行的菊花。
+    @Published var replacingDish: String?
+
+    // replaceDish 让 agent 只重算这一道菜（备选都不满意时的兜底）。
+    // 比整份重生成快得多，但仍要等几十秒，所以要给明确的进行中反馈。
+    func replaceDish(field: String, dishIndex: Int, instruction: String = "") async {
+        let key = "\(field)-\(dishIndex)"
+        guard replacingDish == nil else { return }
+        replacingDish = key
+        applyError = nil
+        defer { replacingDish = nil }
+        do {
+            let result = try await api.replaceDish(meal: field, dishIndex: dishIndex, instruction: instruction)
+            // 服务端已经把简报缓存改好了，直接用它回的整份菜单替换本地状态，两边不会漂。
+            if let m = result.menu {
+                brief?.menu = m
+            }
+            consumedNotice = result.note.isEmpty ? "已换成「\(result.dish.name)」" : result.note
+        } catch {
+            applyError = error.localizedDescription
+        }
+    }
+
+    // swapAlternative 把主推的第 dishIndex 道菜和第 altIndex 道备选【对调】。
+    //
+    // 这是「调整菜单」的主路径：纯本地数组交换，不发请求、不跑 agent、不花 token。
+    // 对调而不是覆盖——换走的那道回到备选位，家长反悔能换回来。
+    // uses 跟着整个 EditDish 一起走，所以采纳时扣的是换之后那道菜的食材，不用额外同步。
+    func swapAlternative(field: String, dishIndex: Int, altIndex: Int) {
+        guard var menu = brief?.menu,
+              let m = menu.meals.firstIndex(where: { $0.meal == field }),
+              var alts = menu.meals[m].alternatives,
+              menu.meals[m].dishes.indices.contains(dishIndex),
+              alts.indices.contains(altIndex) else { return }
+        let main = menu.meals[m].dishes[dishIndex]
+        menu.meals[m].dishes[dishIndex] = alts[altIndex]
+        alts[altIndex] = main
+        menu.meals[m].alternatives = alts
+        brief?.menu = menu
     }
 
     // 简报是不是今天的——昨天的照样显示，但提示家长可以重新生成。
@@ -245,6 +307,23 @@ struct BriefView: View {
         } message: {
             Text(vm.applyError ?? "")
         }
+        // 采纳成功后自动扣了库存——用一条可消失的横幅明示，不打断操作但也绝不隐瞒。
+        .overlay(alignment: .bottom) {
+            if let notice = vm.consumedNotice {
+                Text(notice)
+                    .font(.footnote)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .padding(.bottom, 12)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .task(id: notice) {
+                        try? await Task.sleep(nanoseconds: 3_000_000_000)
+                        withAnimation { vm.consumedNotice = nil }
+                    }
+            }
+        }
+        .animation(.default, value: vm.consumedNotice)
     }
 
     // MARK: - 结构化推荐（可编辑 + 采纳）
@@ -318,13 +397,50 @@ struct BriefView: View {
                     .buttonStyle(.bordered)
                 }
             }
-            ForEach(meal.dishes) { dish in
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(dish.name).font(.callout)
-                    if !dish.detail.isEmpty {
-                        Text(dish.detail)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+            ForEach(Array(meal.dishes.enumerated()), id: \.element.id) { idx, dish in
+                HStack(alignment: .top, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(dish.name).font(.callout)
+                        if !dish.detail.isEmpty {
+                            Text(dish.detail)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    Spacer(minLength: 0)
+                    // 换菜入口。已采纳的餐不再提供（账已经记了）。
+                    // 两级：先给 agent 生成时顺手带回的备选（零请求、零延迟），
+                    // 都不满意再走「让 agent 另想一道」——只重算这一道，不动整餐。
+                    if !applied {
+                        if vm.replacingDish == "\(meal.meal)-\(idx)" {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Menu {
+                                ForEach(Array((meal.alternatives ?? []).enumerated()), id: \.element.id) { altIdx, alt in
+                                    Button {
+                                        withAnimation {
+                                            vm.swapAlternative(field: meal.meal, dishIndex: idx, altIndex: altIdx)
+                                        }
+                                    } label: {
+                                        Text(alt.detail.isEmpty ? alt.name : "\(alt.name)（\(alt.detail)）")
+                                    }
+                                }
+                                // 没备选时不画分隔线，免得菜单顶上挂一条孤零零的横线。
+                                if !(meal.alternatives ?? []).isEmpty {
+                                    Divider()
+                                }
+                                Button {
+                                    Task { await vm.replaceDish(field: meal.meal, dishIndex: idx) }
+                                } label: {
+                                    Label("让 agent 另想一道", systemImage: "sparkles")
+                                }
+                            } label: {
+                                Image(systemName: "arrow.triangle.2.circlepath")
+                                    .font(.caption)
+                            }
+                            .buttonStyle(.borderless)
+                            .disabled(vm.replacingDish != nil)
+                        }
                     }
                 }
             }

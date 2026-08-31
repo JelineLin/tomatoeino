@@ -161,6 +161,53 @@ struct APIClient {
         return try JSONDecoder().decode([InventoryItem].self, from: data)
     }
 
+    // parseInventoryText 把家长的一句话（多为语音转写）解析成库存条目（返回预览，后端不入库）。
+    // 和 parseOrderImage 同一口径：解析结果必须过一遍家长的眼睛再入库。
+    // 纯文字抽取比视觉快得多，超时 45s 够用。
+    func parseInventoryText(_ text: String) async throws -> [InventoryItem] {
+        struct Body: Encodable { let text: String }
+        var req = authorizedRequest(baseURL.appendingPathComponent("api/inventory/parse-text"))
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONEncoder().encode(Body(text: text))
+        req.timeoutInterval = 45
+        let (data, response) = try await URLSession.shared.data(for: req)
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            let msg = String(data: data, encoding: .utf8).flatMap { $0.isEmpty ? nil : $0 }
+                ?? "HTTP \(http.statusCode)"
+            throw APIError.server(msg)
+        }
+        return try JSONDecoder().decode([InventoryItem].self, from: data)
+    }
+
+    // addInventoryBatch 一次性入库多条（一句话/一张订单解析出来的通常是好几样）。
+    // 逐条发请求会在中途失败时留下「入了一半」的账，所以走后端的 add_batch。
+    func addInventoryBatch(_ items: [InventoryItem]) async throws -> [InventoryItem] {
+        struct ItemBody: Encodable {
+            let name: String
+            let quantity: Double
+            let unit: String
+        }
+        struct Body: Encodable {
+            let op: String
+            let items: [ItemBody]
+        }
+        var req = authorizedRequest(baseURL.appendingPathComponent("api/inventory"))
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONEncoder().encode(Body(
+            op: "add_batch",
+            items: items.map { ItemBody(name: $0.name, quantity: $0.quantity, unit: $0.unit) }
+        ))
+        let (data, response) = try await URLSession.shared.data(for: req)
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            let msg = String(data: data, encoding: .utf8).flatMap { $0.isEmpty ? nil : $0 }
+                ?? "HTTP \(http.statusCode)"
+            throw APIError.server(msg)
+        }
+        return try JSONDecoder().decode([InventoryItem].self, from: data)
+    }
+
     private func writeInventory(op: String, name: String, quantity: Double, unit: String) async throws -> [InventoryItem] {
         struct Body: Encodable {
             let op: String
@@ -235,11 +282,16 @@ struct APIClient {
     }
 
     // applyMeal 采纳（家长编辑后的）推荐的一餐，写进历史（POST /api/history/apply）。
-    // 后端等价于 record_meal，但由家长确认后触发。返回更新后的整份历史。
-    func applyMeal(date: String, meal: String, time: String, dishes: [EditDish]) async throws -> [Day] {
+    // 后端等价于 record_meal，但由家长确认后触发。
+    //
+    // 返回值除了新历史还带「这次自动扣了什么库存」——采纳即出库，家长不用再记得
+    // 去减库存；但扣了什么必须当场说清楚，不然就是背着人改账本。
+    // dishes 里的 uses 原样回传：换过备选菜、编辑过菜品，带回的自然是换之后那道菜的。
+    func applyMeal(date: String, meal: String, time: String, dishes: [EditDish]) async throws -> ApplyResult {
         struct DishBody: Encodable {
             let name: String
             let detail: String
+            let uses: [IngredientUse]?
         }
         struct Body: Encodable {
             let date: String
@@ -249,7 +301,7 @@ struct APIClient {
         }
         let body = Body(
             date: date, meal: meal, time: time,
-            dishes: dishes.map { DishBody(name: $0.name, detail: $0.detail) }
+            dishes: dishes.map { DishBody(name: $0.name, detail: $0.detail, uses: $0.uses) }
         )
         var req = authorizedRequest(baseURL.appendingPathComponent("api/history/apply"))
         req.httpMethod = "POST"
@@ -261,7 +313,32 @@ struct APIClient {
                 ?? "HTTP \(http.statusCode)"
             throw APIError.server(msg)
         }
-        return try JSONDecoder().decode([Day].self, from: data)
+        return try JSONDecoder().decode(ApplyResult.self, from: data)
+    }
+
+    // replaceDish 只换掉某一餐的第 dishIndex 道菜，其余原样（POST /api/brief/dish）。
+    //
+    // 「调整菜单」的第二级：备选菜（简报里一并带回的 alternatives）是第一级，零请求零延迟；
+    // 两道备选都不满意才落到这里，只重算一道菜；再不行才是整份重生成。
+    // 比整份重生成快得多，但仍要跑几轮工具，超时给 150s。
+    func replaceDish(meal: String, dishIndex: Int, instruction: String) async throws -> ReplaceDishResult {
+        struct Body: Encodable {
+            let meal: String
+            let dishIndex: Int
+            let instruction: String
+        }
+        var req = authorizedRequest(baseURL.appendingPathComponent("api/brief/dish"))
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONEncoder().encode(Body(meal: meal, dishIndex: dishIndex, instruction: instruction))
+        req.timeoutInterval = 150
+        let (data, response) = try await URLSession.shared.data(for: req)
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            let msg = String(data: data, encoding: .utf8).flatMap { $0.isEmpty ? nil : $0 }
+                ?? "HTTP \(http.statusCode)"
+            throw APIError.server(msg)
+        }
+        return try JSONDecoder().decode(ReplaceDishResult.self, from: data)
     }
 
     // adjustBrief 智能调整简报：把家长的自然语言要求（如「晚餐别做鱼」）发给后端，

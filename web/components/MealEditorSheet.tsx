@@ -29,7 +29,9 @@ export default function MealEditorSheet({
   );
 
   const cleaned = dishes
-    .map((d) => ({ name: d.name.trim(), detail: d.detail.trim() }))
+    // uses 必须原样带过去：这条路（编辑并采纳）正是自动扣库存的主入口，
+    // 清洗时把它丢了，扣减就整个静默失效——最难发现的那种坏法。
+    .map((d) => ({ name: d.name.trim(), detail: d.detail.trim(), uses: d.uses }))
     .filter((d) => d.name !== "");
 
   return (

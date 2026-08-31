@@ -40,20 +40,34 @@ final class InventoryViewModel: ObservableObject {
         }
     }
 
-    // addAll 把确认后的多条依次入库，并【累计失败项】——否则中途某条失败会被后续成功
-    // 把 errorText 冲掉，家长根本不知道有条目没进去（审查抓到的静默丢失）。
-    func addAll(_ items: [EditableInvItem]) async {
-        var failed: [String] = []
-        for it in items {
-            do {
-                self.items = try await api.addInventory(name: it.name, quantity: it.quantity, unit: it.unit)
-            } catch {
-                failed.append(it.name)
-            }
+    // parseSpoken 把家长的一句话（多为语音转写）解析成条目（不入库）。
+    // 和扫订单汇到同一条确认路径——不管来源是图还是话，进账之前都要过一遍家长的眼睛。
+    func parseSpoken(_ text: String) async -> [InventoryItem]? {
+        parsing = true
+        parseError = nil
+        defer { parsing = false }
+        do {
+            return try await api.parseInventoryText(text)
+        } catch {
+            parseError = error.localizedDescription
+            return nil
         }
-        errorText = failed.isEmpty
-            ? nil
-            : "有 \(failed.count) 项没入库：\(failed.joined(separator: "、"))，可手动再加"
+    }
+
+    // addAll 把确认后的多条【一次性】入库。
+    // 原来是逐条发请求 + 累计失败项，问题是中途失败会留下「入了一半」的账，
+    // 而家长在确认页看到的是完整一批，回头对不上。改走后端 add_batch：
+    // 后端先全校验再全写入，要么整批进、要么整批不进，报错也只有一条。
+    func addAll(_ items: [EditableInvItem]) async {
+        guard !items.isEmpty else { return }
+        do {
+            self.items = try await api.addInventoryBatch(items.map {
+                InventoryItem(name: $0.name, quantity: $0.quantity, unit: $0.unit)
+            })
+            errorText = nil
+        } catch {
+            errorText = "入库失败：\(error.localizedDescription)"
+        }
     }
 
     func load() async {
@@ -105,7 +119,10 @@ final class InventoryViewModel: ObservableObject {
         let it = items[i]
         let newQ = max(1, it.quantity + delta)
         guard newQ != it.quantity else { return }
-        items[i] = InventoryItem(name: it.name, quantity: newQ, unit: it.unit)
+        // 只改数量，新鲜度沿用原值——本地回显不该顺手把徽章抹掉（真值等下一次 GET 回来）。
+        items[i] = InventoryItem(name: it.name, quantity: newQ, unit: it.unit,
+                                 updatedAt: it.updatedAt, freshness: it.freshness,
+                                 days: it.days, shelfLife: it.shelfLife, category: it.category)
 
         pendingCommits[name]?.cancel()
         pendingCommits[name] = Task { [weak self] in
@@ -123,6 +140,8 @@ struct InventoryView: View {
     @State private var addingNew = false
     @State private var photoItem: PhotosPickerItem?   // 选中的订单截图
     @State private var parsedOrder: ParsedOrder?      // 解析结果（非 nil 打开确认 sheet）
+    @State private var quickAdding = false            // 一句话入库 sheet
+    @State private var pendingParsed: [InventoryItem]? // 一句话解析结果，等 sheet 关掉再转交确认页
 
     var body: some View {
         NavigationStack {
@@ -135,6 +154,16 @@ struct InventoryView: View {
             }
             .navigationTitle("家庭库存")
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    // 一句话入库（主路径）：说一句「买了两块鳕鱼、一个西兰花」就完事。
+                    // 排在扫订单前面是有意的——截图那条路要切 App、等解析，还在相册里
+                    // 堆垃圾图；入库端的摩擦正是账本失准的源头。
+                    Button {
+                        quickAdding = true
+                    } label: {
+                        Image(systemName: "mic.badge.plus")
+                    }
+                }
                 ToolbarItem(placement: .topBarLeading) {
                     // 扫订单：选一张订单截图，视觉模型解析成条目。
                     PhotosPicker(selection: $photoItem, matching: .images) {
@@ -167,13 +196,29 @@ struct InventoryView: View {
                 }
             }
             .sheet(item: $parsedOrder) { order in
-                // 订单识别结果预览：可改可删，确认后全部入库。
+                // 识别结果预览：可改可删，确认后全部入库。图片和一句话共用这一个确认页。
                 ParsedOrderSheet(items: order.items) { confirmed in
                     Task { await vm.addAll(confirmed) }
                 }
             }
+            // 解析结果先寄存，等这个 sheet 真正关掉了再打开确认页——
+            // 前一个 sheet 还在收尾时直接开下一个，iOS 会把第二个吞掉。
+            .sheet(isPresented: $quickAdding, onDismiss: {
+                if let pending = pendingParsed {
+                    pendingParsed = nil
+                    parsedOrder = ParsedOrder(items: pending.map {
+                        EditableInvItem(name: $0.name, quantity: $0.quantity, unit: $0.unit)
+                    })
+                }
+            }) {
+                QuickAddSheet { text in
+                    guard let parsed = await vm.parseSpoken(text), !parsed.isEmpty else { return false }
+                    pendingParsed = parsed
+                    return true
+                }
+            }
             .alert(
-                "订单没识别成功",
+                "没识别成功",
                 isPresented: Binding(get: { vm.parseError != nil }, set: { if !$0 { vm.parseError = nil } })
             ) {
                 Button("好", role: .cancel) {}
@@ -213,7 +258,8 @@ struct InventoryView: View {
             Color.black.opacity(0.15).ignoresSafeArea()
             VStack(spacing: 12) {
                 ProgressView()
-                Text("正在识别订单…").font(.footnote).foregroundStyle(.secondary)
+                // 订单截图和一句话共用这个遮罩，文案别写死成「订单」。
+                Text("正在识别…").font(.footnote).foregroundStyle(.secondary)
             }
             .padding(24)
             .background(.regularMaterial)
@@ -251,7 +297,16 @@ struct InventoryView: View {
                             Button {
                                 editing = item
                             } label: {
-                                Text(item.name).foregroundStyle(.primary)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(item.name).foregroundStyle(.primary)
+                                    // 新鲜度徽章：只标「该吃了」和「可能没了」——全都标一遍等于没标。
+                                    // 后端已按紧急度排序，所以要处理的东西天然聚在列表顶部。
+                                    if let badge = item.freshnessBadge {
+                                        Text(badge.text)
+                                            .font(.caption2)
+                                            .foregroundStyle(badge.isUrgent ? Color.red : Color.orange)
+                                    }
+                                }
                             }
                             .buttonStyle(.plain)
 
@@ -455,5 +510,125 @@ private struct InventoryEditorSheet: View {
             }
         }
         .presentationDetents([.medium])
+    }
+}
+
+// QuickAddSheet 是「一句话入库」的输入层：家长说一句（或打一句）买了什么，
+// 交给后端解析成条目，再走和扫订单同一个确认页。
+//
+// 为什么这条路值得存在：入库原本只有截图那一条，要切到买菜 App、截图、回来上传、
+// 等视觉模型，末了相册里还多一张永远不会再看的图。摩擦全堆在入库这一端，
+// 家长自然就不记了——账本失准的根不在算法，在这儿。说一句话是最短的入库动作。
+//
+// onParse 返回 true 表示解析成功（外层已打开确认页），本 sheet 随即自行关闭。
+private struct QuickAddSheet: View {
+    let onParse: (String) async -> Bool
+
+    @Environment(\.dismiss) private var dismiss
+    @StateObject private var dictator = SpeechDictator()
+    @State private var text = ""
+    @State private var working = false
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("说说买了什么，比如「买了两块鳕鱼、一个西兰花、一盒鸡蛋」")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+
+                HStack(alignment: .bottom, spacing: 10) {
+                    // 麦克风：录音中变红+实心，和聊天页同一套视觉语言。
+                    Button(action: toggleDictation) {
+                        Image(systemName: dictator.isRecording ? "mic.fill" : "mic")
+                            .font(.body.weight(.medium))
+                            .foregroundStyle(dictator.isRecording ? Color.red : Color.secondary)
+                            .frame(width: 36, height: 36)
+                            .background(
+                                Circle().fill(dictator.isRecording
+                                              ? Color.red.opacity(0.12)
+                                              : Color(.secondarySystemBackground))
+                            )
+                    }
+                    .disabled(working)
+                    .accessibilityLabel(dictator.isRecording ? "停止语音输入" : "语音输入")
+                    .animation(.easeInOut(duration: 0.15), value: dictator.isRecording)
+
+                    TextField("买了…", text: $text, axis: .vertical)
+                        .lineLimit(1...4)
+                        .textFieldStyle(.roundedBorder)
+                        .focused($focused)
+                        .disabled(working)
+                }
+
+                Button(action: parse) {
+                    if working {
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.small)
+                            Text("识别中…")
+                        }
+                        .frame(maxWidth: .infinity)
+                    } else {
+                        Text("识别").frame(maxWidth: .infinity)
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(working || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                Spacer()
+            }
+            .padding()
+            .navigationTitle("一句话入库")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") {
+                        dictator.stop()
+                        dismiss()
+                    }
+                }
+            }
+        }
+        .presentationDetents([.medium])
+        // 离开时务必停掉录音：识别任务还挂着会一直占着麦克风和音频会话。
+        .onDisappear { dictator.stop() }
+        .alert(
+            "语音输入不可用",
+            isPresented: Binding(
+                get: { dictator.errorText != nil },
+                set: { if !$0 { dictator.errorText = nil } }
+            )
+        ) {
+            Button("知道了", role: .cancel) { dictator.errorText = nil }
+        } message: {
+            Text(dictator.errorText ?? "")
+        }
+    }
+
+    // 录着就停，没录就开；开录前记下已有文字当前缀，识别结果拼在后面。
+    private func toggleDictation() {
+        if dictator.isRecording {
+            dictator.stop()
+            return
+        }
+        focused = false
+        let existing = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prefix = existing.isEmpty ? "" : existing + " "
+        dictator.start { recognized in
+            text = prefix + recognized
+        }
+    }
+
+    // 话音未落就点识别，得先把录音停掉——否则收尾的识别结果会盖掉正在解析的这句。
+    private func parse() {
+        dictator.stop()
+        let payload = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !payload.isEmpty, !working else { return }
+        working = true
+        Task {
+            let ok = await onParse(payload)
+            working = false
+            if ok { dismiss() }
+        }
     }
 }

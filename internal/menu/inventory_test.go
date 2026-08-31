@@ -166,3 +166,43 @@ func TestInventoryTools(t *testing.T) {
 		t.Errorf("出库失败应还人话不还 error: %q err=%v", out, err)
 	}
 }
+
+// 批量出库（采纳一餐自动扣账）：能扣的扣掉、扣不动的只记进 missed，
+// 绝不因为一样对不上就让整次采纳失败——库存是「线索」不是「账本」。
+func TestInventory_ConsumeAllSkipsMissing(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.Add("鳕鱼", 2, "块"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Add("西兰花", 0.5, "份"); err != nil {
+		t.Fatal(err)
+	}
+
+	consumed, missed := s.ConsumeAll([]IngredientUse{
+		{Name: "鳕鱼", Qty: 1},
+		{Name: "西兰花", Qty: 1},  // 不够扣 → 清零出清，不记负数
+		{Name: "帝王蟹", Qty: 1},  // 账上没有 → missed
+		{Name: "   ", Qty: 1},   // 空名 → 静默跳过，既不扣也不算 missed
+		{Name: "鳕鱼", Qty: 0},   // 份数非正 → 同上
+	})
+
+	if len(consumed) != 2 {
+		t.Fatalf("应扣成 2 条，实际 %d 条：%+v", len(consumed), consumed)
+	}
+	if consumed[0].Name != "鳕鱼" || consumed[0].Remaining != 1 || consumed[0].Depleted {
+		t.Errorf("鳕鱼应还剩 1 块且未出清：%+v", consumed[0])
+	}
+	if consumed[1].Name != "西兰花" || !consumed[1].Depleted || consumed[1].Remaining != 0 {
+		t.Errorf("西兰花不够扣应出清归零：%+v", consumed[1])
+	}
+	if len(missed) != 1 || missed[0] != "帝王蟹" {
+		t.Errorf("只有帝王蟹该进 missed，实际 %+v", missed)
+	}
+
+	// 出清的条目不该继续占货架。
+	for _, it := range s.List("") {
+		if it.Name == "西兰花" {
+			t.Errorf("出清后西兰花不该还在账上：%+v", it)
+		}
+	}
+}

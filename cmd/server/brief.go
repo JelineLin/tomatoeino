@@ -34,11 +34,19 @@ import (
 // 最后一句是硬约束：定时任务跑的时候没有人在线，agent 要是调了 ask_user，
 // 问题会原样变成「简报」存下来——所以明令禁止追问，信息不足就按已有数据尽力给。
 const briefPrompt = `请主动为今天生成一份「今日备餐简报」，家长早上会直接查看：
-1. 先查最近几天吃了什么（避免重样），再查当月时令；
-2. 给出今天的 午餐、水果、晚餐 建议，每餐 1~2 道，附关键做法/分量要点；
+1. 先查最近几天吃了什么（避免重样），再查当月时令，再查一次家庭库存；
+2. 给出今天的 午餐、水果、晚餐 建议，每餐 1~2 道，附关键做法/分量要点。
+   优先把库存里【已经有的】食材用掉，别让家长为了做你推荐的菜专门再跑一趟；
+   库存清单里标了「该吃了」的要优先安排进今天——那是再不吃就要浪费的东西；
+   标了「可能已经吃完或坏了」的别当作确定有，真要用就在正文里提醒家长先确认；
 3. 在写文字之前，先调用一次 propose_menu 把这三餐登记成结构化菜单（家长端要据此
-   显示可编辑、可一键采纳的卡片）——这一步是必须的；
-4. 然后照常写文字版简报，结尾用一句话点出今天的搭配思路。
+   显示可编辑、可一键采纳的卡片）——这一步是必须的。登记时两件事不能省：
+   · 每餐给 2 道 alternatives 备选菜，家长换菜时直接顶替主推，所以每道备选都要
+     同样满足时令/库存/不重样，不要写成主推的变体；
+   · 每道菜（含备选）凡是会吃掉库存里已有的食材，都在 uses 里列出食材名和份数——
+     家长采纳这一餐时会照它自动出库；
+4. 然后照常写文字版简报，正文只写主推的菜（备选留给卡片，不用写进正文），
+   结尾用一句话点出今天的搭配思路。
 注意：这是定时任务，没有人在线回答问题——绝对不要调用 ask_user，直接给出完整简报。`
 
 // briefGenTimeout 单次生成的超时。agent 要跑好几轮工具+模型，给足余量。
@@ -100,6 +108,65 @@ func (b *briefStore) markApplied(date, mealField string, stored *menu.Meal) {
 	nb := *b.brief
 	nb.Menu = nm
 	b.brief = &nb
+}
+
+// replaceDish 把简报缓存里某餐的第 idx 道菜换成 next，返回换完的整份菜单。
+// 找不到（简报换了天、餐别不存在、下标越界）返回 nil，调用方据此报 409/400。
+//
+// 克隆换指针，不原地改——理由同 markApplied：get() 交出去的指针可能正被序列化。
+func (b *briefStore) replaceDish(date, mealField string, idx int, next menu.Dish) *menu.RecommendedMenu {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.brief == nil || b.brief.Menu == nil || b.brief.Menu.Date != date {
+		return nil
+	}
+	old := b.brief.Menu
+	nm := &menu.RecommendedMenu{Date: old.Date, Meals: make([]menu.ProposedMeal, len(old.Meals))}
+	copy(nm.Meals, old.Meals)
+	for i := range nm.Meals {
+		if nm.Meals[i].Meal != mealField {
+			continue
+		}
+		if idx < 0 || idx >= len(nm.Meals[i].Dishes) {
+			return nil
+		}
+		// 菜品切片也要克隆：copy 出来的 ProposedMeal 和旧的共用同一个底层数组，
+		// 直接改会把旧快照一起改掉（切片克隆坑，反馈那轮踩过一次）。
+		dishes := make([]menu.Dish, len(nm.Meals[i].Dishes))
+		copy(dishes, nm.Meals[i].Dishes)
+		dishes[idx] = next
+		nm.Meals[i].Dishes = dishes
+		nb := *b.brief
+		nb.Menu = nm
+		b.brief = &nb
+		return nm
+	}
+	return nil
+}
+
+// replaceDishPrompt 拼「只换这一道」的指令。
+//
+// 刻意把工具面收窄在文字里而不是真去改 agent 的工具集：换一道菜要的上下文
+// （库存/时令/最近吃了什么）和整份简报是同一批，重新装配一个精简 agent 不值当；
+// 真正要防的是模型顺手把整餐重排了，那靠指令说清楚就够。
+func replaceDishPrompt(mealLabel, oldDish string, siblings []string, instruction string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "家长想把今天%s里的「%s」换掉，请另选一道顶替它。\n", mealLabel, oldDish)
+	b.WriteString("步骤：\n")
+	b.WriteString("1. 先查一次家庭库存、当月时令，再看看最近几天吃了什么；\n")
+	b.WriteString("2. 新菜要能顶替原来那道在这一餐里的角色（主食/蛋白/蔬菜别错位）；\n")
+	if len(siblings) > 0 {
+		fmt.Fprintf(&b, "3. 这一餐里保留不动的还有：%s——新菜不要和它们重复或撞味；\n", strings.Join(siblings, "、"))
+	} else {
+		b.WriteString("3. 这一餐没有别的菜要考虑；\n")
+	}
+	b.WriteString("4. 别和最近几天吃过的重样；库存里标了「该吃了」的优先用掉；\n")
+	b.WriteString("5. 选定后调用一次 propose_dish 登记这道菜（记得带 uses），然后用一两句话告诉家长换成了什么、为什么。\n")
+	if s := strings.TrimSpace(instruction); s != "" {
+		fmt.Fprintf(&b, "\n家长对这次替换的额外要求：%s\n", s)
+	}
+	b.WriteString("\n注意：只换这一道菜，不要重新安排整餐，不要调用 propose_menu 或 record_meal，也绝对不要调用 ask_user。")
+	return b.String()
 }
 
 // generateBrief 跑一次 agent 生成简报并落库（多用户后按 workspace 生成）。
@@ -206,6 +273,121 @@ func (s *server) handleBrief(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Error(w, "还没有简报。等定时任务生成，或用 /api/brief?refresh=1 立即生成。", http.StatusNotFound)
+}
+
+// replaceDishRequest 是「换掉某一道菜」的请求体。
+type replaceDishRequest struct {
+	Meal        string `json:"meal"`        // lunch/fruit/dinner
+	DishIndex   int    `json:"dishIndex"`   // 这一餐里第几道（0 起）
+	Instruction string `json:"instruction"` // 可选：家长对这次替换的额外要求
+}
+
+// replaceDishResponse 回新菜 + 换完的整份菜单（前端直接替换本地状态）+ agent 的一句说明。
+type replaceDishResponse struct {
+	Dish menu.Dish             `json:"dish"`
+	Menu *menu.RecommendedMenu `json:"menu"`
+	Note string                `json:"note"`
+}
+
+// replaceDishTimeout 比整份简报短得多：只换一道菜，工具最多跑三四轮。
+// 给足 2 分钟是为了容忍慢网关，但正常应该 20~40 秒回来。
+const replaceDishTimeout = 2 * time.Minute
+
+// handleReplaceDish 只重新生成【一道菜】，其余原样不动。
+//
+// 这是「调整菜单」的第二级：备选菜（propose_menu 一并带回的 Alternatives）是第一级，
+// 零请求零延迟，吃掉大部分「这道不想吃，换一个」；两道备选都不满意才落到这里。
+// 第三级才是 POST /api/brief 的整份重生成（「重摇整天」）。
+// 三级从便宜到贵，绝大多数调整应该止步于第一级。
+func (s *server) handleReplaceDish(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "只支持 POST", http.StatusMethodNotAllowed)
+		return
+	}
+	ws, err := s.ws(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 8<<10)
+	var req replaceDishRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "请求体不是合法 JSON："+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	cur := ws.briefs.get()
+	if cur == nil || cur.Menu == nil {
+		http.Error(w, "当前没有结构化菜单可改，先生成一份简报", http.StatusConflict)
+		return
+	}
+	// 先在本地找到那道菜：拿到菜名和同餐的其他菜喂给 prompt，也顺便把越界挡在调模型之前。
+	var target *menu.ProposedMeal
+	for i := range cur.Menu.Meals {
+		if cur.Menu.Meals[i].Meal == req.Meal {
+			target = &cur.Menu.Meals[i]
+			break
+		}
+	}
+	if target == nil {
+		http.Error(w, "简报里没有「"+req.Meal+"」这一餐", http.StatusBadRequest)
+		return
+	}
+	if req.DishIndex < 0 || req.DishIndex >= len(target.Dishes) {
+		http.Error(w, "dishIndex 越界", http.StatusBadRequest)
+		return
+	}
+	oldDish := target.Dishes[req.DishIndex]
+	siblings := make([]string, 0, len(target.Dishes))
+	for i, d := range target.Dishes {
+		if i != req.DishIndex {
+			siblings = append(siblings, d.Name)
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), replaceDishTimeout)
+	defer cancel()
+	ctx, sink := menu.WithDishSink(ctx)
+	prompt := replaceDishPrompt(mealLabel(req.Meal), oldDish.Name, siblings, req.Instruction)
+	log.Printf("🔁 [%s] 换菜：%s / %s", userIDFrom(r), req.Meal, oldDish.Name)
+	msg, err := ws.agent.Generate(ctx, []*schema.Message{schema.UserMessage(prompt)})
+	if err != nil {
+		http.Error(w, "换菜失败："+err.Error(), http.StatusBadGateway)
+		return
+	}
+	next := sink.Get()
+	if next == nil {
+		// 模型没调 propose_dish（多半是绕开工具直接用文字答了）。不猜、不硬解析它的自由文本——
+		// 把原话带回去让家长自己看，总比把一句散文当成菜名塞进卡片强。
+		http.Error(w, "agent 没有给出可用的替换菜，请再试一次或换个说法。它说："+truncateRunes(msg.Content, 200), http.StatusBadGateway)
+		return
+	}
+
+	nm := ws.briefs.replaceDish(cur.Menu.Date, req.Meal, req.DishIndex, *next)
+	if nm == nil {
+		// 期间简报被重新生成/换了天，位置对不上了。不强行写，让前端重拉。
+		http.Error(w, "简报已变化，请刷新后重试", http.StatusConflict)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if err := json.NewEncoder(w).Encode(replaceDishResponse{Dish: *next, Menu: nm, Note: msg.Content}); err != nil {
+		log.Printf("/api/brief/dish 编码失败: %v", err)
+	}
+}
+
+// mealLabel 把餐别字段渲染成中文，喂给 prompt 用（前端各有各的一份，这里只服务模型）。
+func mealLabel(field string) string {
+	switch field {
+	case "lunch":
+		return "午餐"
+	case "fruit":
+		return "水果"
+	case "dinner":
+		return "晚餐"
+	default:
+		return field
+	}
 }
 
 func writeBriefJSON(w http.ResponseWriter, d *dailyBrief) {

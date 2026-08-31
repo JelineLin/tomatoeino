@@ -82,7 +82,9 @@ export default function HistoryPage() {
   function saveMeal(t: MealTarget, time: string, dishes: EditDish[]) {
     writeChain.current = writeChain.current.then(async () => {
       try {
-        setDays((await api.applyMeal(t.date, t.field, time, dishes)).reverse());
+        // 历史页手动编辑/补记的菜没有 uses（不是从推荐来的），后端因此不会扣库存——
+        // 只取 history，consumed 必为空。
+        setDays((await api.applyMeal(t.date, t.field, time, dishes)).history.reverse());
         setActionError("");
       } catch (e) {
         setActionError(`${t.date} ${t.label}没保存成功：${e instanceof Error ? e.message : e}`);

@@ -51,6 +51,23 @@ type Dish struct {
 	Name     string    `json:"name"`
 	Detail   string    `json:"detail"`
 	Feedback *Feedback `json:"feedback,omitempty"` // nil=还没反馈（omitempty 兼容旧数据）
+	// Uses 是这道菜会吃掉哪几样家庭库存，由 propose_menu 在推荐时一并登记。
+	// 家长采纳这一餐时按它自动出库（见 InventoryStore.ConsumeAll）。
+	// omitempty：历史里的旧菜没有这个字段，聊天里 record_meal 记的餐也不填。
+	Uses []IngredientUse `json:"uses,omitempty"`
+}
+
+// IngredientUse 是「这道菜用掉哪样库存、用掉多少」。
+//
+// 关键设计：扣减依据在【推荐生成的那一刻】就确定，而不是采纳时再让模型猜一遍。
+// agent 本来就是照着 list_inventory 的结果配的菜，那一刻它最清楚这道菜吃掉的是
+// 账上的哪几样；等到采纳时再推断，等于把已经有的信息丢掉再花一次 token 找回来。
+//
+// 不带单位：单位以账本里已有的为准（Consume 只认名字 + 份数）。让模型少填一个字段，
+// 也就不会出现「账上记的是块、推荐说的是克」这种对不上的情况。
+type IngredientUse struct {
+	Name string  `json:"name"`
+	Qty  float64 `json:"qty"`
 }
 
 // LoadHistory 读 history.json 反序列化成 []Day。

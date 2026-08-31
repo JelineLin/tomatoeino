@@ -152,16 +152,31 @@ func NewTools(store *vectorstore.Store, hs *HistoryStore, inv *InventoryStore, p
 		"给出【成套的三餐推荐】时调用它，把你要推荐的 午餐/水果/晚餐 以结构化形式登记一份"+
 			"（家长端据此显示成可逐项编辑、可一键采纳入库的卡片）。登记后【继续照常】写文字版推荐。"+
 			"只在给出具体成套餐次推荐时用（尤其每日简报）；单纯答疑、查历史不调。"+
-			"它只登记不入库——真正入库由家长在前端点「应用」触发，你不要因此去调 record_meal。",
+			"它只登记不入库——真正入库由家长在前端点「应用」触发，你不要因此去调 record_meal。"+
+			"两件事必须做到：①每餐都要给 alternatives 备选菜（2 道，家长换菜时直接顶替主推，"+
+			"所以要同样满足时令/库存/不重样）；②每道菜（含备选）凡是会吃掉 list_inventory 里"+
+			"已有的食材，都要在 uses 里列出来——家长采纳时会照它自动扣库存，漏填就等于账不平。",
 		makeProposeMenu(),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("创建 propose_menu 工具失败: %w", err)
 	}
 
+	proposeDishTool, err := utils.InferTool(
+		"propose_dish",
+		"【只在家长要求换掉某一道菜时】调用：把你选定的那道替代菜登记下来，家长端会替换掉原来那道。"+
+			"和 propose_menu 的区别是它只登记一道、不动这一餐的其他菜——所以别在给成套推荐时用它。"+
+			"同样只登记不入库。记得带 uses（这道菜会吃掉的库存），否则家长采纳时扣不了账。",
+		makeProposeDish(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("创建 propose_dish 工具失败: %w", err)
+	}
+
 	return []tool.BaseTool{
 		searchTool, recentTool, ingredientTool, seasonTool, askTool,
-		listInvTool, addInvTool, consumeInvTool, recordTool, profileTool, proposeTool,
+		listInvTool, addInvTool, consumeInvTool, recordTool, profileTool,
+		proposeTool, proposeDishTool,
 	}, nil
 }
 
@@ -292,18 +307,23 @@ func makeListInventory(inv *InventoryStore) func(context.Context, invListInput) 
 	return func(ctx context.Context, in invListInput) (string, error) {
 		kw := strings.TrimSpace(in.Keyword)
 		toolLog(ctx, "list_inventory(keyword=%q)", kw)
-		items := inv.List(kw)
+		// 走 ListFresh 而不是 List：份数只说明「有多少」，新鲜度才说明「该不该现在吃」。
+		// 结果已按「越该吃越靠前」排好，模型读到的第一条就是最该处理的。
+		items := inv.ListFresh(kw)
 		if len(items) == 0 {
 			if kw == "" {
 				return "库存账本是空的——还没有登记过任何食材。", nil
 			}
 			return fmt.Sprintf("库存里没有含「%s」的食材。", kw), nil
 		}
-		lines := make([]string, 0, len(items))
+		lines := make([]string, 0, len(items)+2)
 		for _, it := range items {
-			lines = append(lines, "- "+renderInventoryItem(it))
+			lines = append(lines, "- "+renderInventoryItem(it.InventoryItem)+"（"+freshnessLabel(it.Freshness, it.Days)+"）")
 		}
-		return "当前家庭库存：\n" + strings.Join(lines, "\n"), nil
+		// 把口径直说给模型，别指望它自己从「放了4天」推出该优先用掉。
+		return "当前家庭库存（已按该优先吃掉的顺序排列）：\n" + strings.Join(lines, "\n") +
+			"\n\n用法：标了「该吃了」的优先安排进今天的菜；标了「可能已经吃完或坏了」的别再当作确定有——" +
+			"要用就在推荐里提醒家长先确认一下。份数只是参考，不必当成精确账。", nil
 	}
 }
 

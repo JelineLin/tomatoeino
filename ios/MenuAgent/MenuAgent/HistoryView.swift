@@ -54,7 +54,10 @@ final class HistoryViewModel: ObservableObject {
         writeChain = Task { @MainActor in
             await previous.value
             do {
-                self.days = try await self.api.applyMeal(date: date, meal: field, time: time, dishes: dishes).reversed()
+                // 历史页手动编辑/补记的菜没有 uses（不是从推荐来的），后端因此不会扣库存——
+                // 只取 history，consumed 必为空。
+                self.days = try await self.api.applyMeal(date: date, meal: field, time: time, dishes: dishes)
+                    .history.reversed()
             } catch {
                 self.actionError = error.localizedDescription
             }

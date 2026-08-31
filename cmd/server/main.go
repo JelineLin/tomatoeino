@@ -120,8 +120,10 @@ func main() {
 	mux.HandleFunc("/api/history/import", srv.handleImportHistory)
 	mux.HandleFunc("/api/seasonal", srv.handleSeasonal)
 	mux.HandleFunc("/api/brief", srv.handleBrief)
+	mux.HandleFunc("/api/brief/dish", srv.handleReplaceDish)
 	mux.HandleFunc("/api/inventory", srv.handleInventory)
 	mux.HandleFunc("/api/inventory/parse-image", srv.handleParseOrderImage)
+	mux.HandleFunc("/api/inventory/parse-text", srv.handleParseInventoryText)
 	mux.HandleFunc("/api/profile", srv.handleProfile)
 	mux.HandleFunc("/api/chat", srv.handleChat)
 
@@ -285,6 +287,18 @@ type applyMealRequest struct {
 type applyDishInput struct {
 	Name   string `json:"name"`
 	Detail string `json:"detail"`
+	// Uses 是推荐卡片上原样带回来的「这道菜吃掉哪些库存」。采纳成功后照它自动出库——
+	// 家长换过备选菜、编辑过菜品，前端带回的自然就是换之后那道菜的 uses。
+	Uses []menu.IngredientUse `json:"uses"`
+}
+
+// applyMealResponse 是采纳一餐的结果。
+// 比原来多回一个「这次自动扣了什么库存」——出库是家长没点过的副作用，
+// 不明说等于偷改账本；前端据此弹一句「已扣减：西兰花 1 份（用完了）」。
+type applyMealResponse struct {
+	History  []menu.Day          `json:"history"`
+	Consumed []menu.ConsumedItem `json:"consumed"`
+	Missed   []string            `json:"missed"` // 账上找不到、没扣成的食材名
 }
 
 // handleApplyMeal 把（家长编辑后的）推荐的一餐写进历史（POST 专用）。
@@ -323,7 +337,7 @@ func (s *server) handleApplyMeal(w http.ResponseWriter, r *http.Request) {
 		if name == "" {
 			continue
 		}
-		dishes = append(dishes, menu.Dish{Name: name, Detail: strings.TrimSpace(d.Detail)})
+		dishes = append(dishes, menu.Dish{Name: name, Detail: strings.TrimSpace(d.Detail), Uses: d.Uses})
 	}
 	if len(dishes) == 0 {
 		http.Error(w, "这一餐至少要有一道菜", http.StatusBadRequest)
@@ -331,7 +345,7 @@ func (s *server) handleApplyMeal(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// SetMeal 会校验餐别（非法返回 error → 400），并结转旧反馈；返回真正落库的那一餐。
-	stored, _, err := ws.history.SetMeal(date, req.Meal, menu.Meal{Time: strings.TrimSpace(req.Time), Dishes: dishes})
+	stored, replaced, err := ws.history.SetMeal(date, req.Meal, menu.Meal{Time: strings.TrimSpace(req.Time), Dishes: dishes})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -342,9 +356,28 @@ func (s *server) handleApplyMeal(w http.ResponseWriter, r *http.Request) {
 	// ③ 简报缓存回写：卡片换成实际采纳的版本并标 Applied——家长的编辑不再「看起来没保存」。
 	ws.briefs.markApplied(date, req.Meal, stored)
 
-	// 回整份历史，前端直接刷新历史 tab。
+	// ④ 自动出库：家长采纳即扣，不再要求他事后想起来去减库存——出库端的手工维护
+	//    正是账本必然失准的地方。
+	//
+	//    只在【首次写入这一餐】时扣（replaced=false）。同天同餐再采纳一次（改了菜、
+	//    或早上手记过），宁可不扣也不重复扣：多扣会把家里明明还有的东西从账上抹掉，
+	//    害得后续推荐主动避开它——这个方向的错比少扣难受得多，家长也更难发现。
+	var consumed []menu.ConsumedItem
+	var missed []string
+	if !replaced {
+		consumed, missed = ws.inv.ConsumeAll(menu.MergeUses(dishes))
+		if len(missed) > 0 {
+			log.Printf("/api/history/apply %s-%s 有 %d 样食材没扣成（账上找不到）: %v", date, req.Meal, len(missed), missed)
+		}
+	}
+
+	// 回整份历史（前端直接刷新历史 tab）+ 这次的出库结果。
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	if err := json.NewEncoder(w).Encode(ws.history.Snapshot()); err != nil {
+	if err := json.NewEncoder(w).Encode(applyMealResponse{
+		History:  ws.history.Snapshot(),
+		Consumed: consumed,
+		Missed:   missed,
+	}); err != nil {
 		log.Printf("/api/history/apply 编码失败: %v", err)
 	}
 }
@@ -478,10 +511,13 @@ func (s *server) handleSeasonal(w http.ResponseWriter, r *http.Request) {
 // 用「POST + op 字段」而不是 PUT/DELETE，是为了不动 withCORS 的允许方法集
 //（现在只放行 GET/POST/OPTIONS），也省掉浏览器预检的麻烦。
 type inventoryWrite struct {
-	Op       string  `json:"op"`       // set（设为精确值/新增）| add（累加入库）| remove（删除整条）
+	Op       string  `json:"op"`       // set（设为精确值/新增）| add（累加入库）| add_batch（批量累加）| remove（删除整条）
 	Name     string  `json:"name"`     //
 	Quantity float64 `json:"quantity"` // set/add 用；remove 忽略
 	Unit     string  `json:"unit"`     // 可空，沿用已有/默认「份」
+	// Items 是 op=add_batch 时要一次性入库的条目——一句话/一张订单解析出来的
+	// 通常是好几样，逐条发请求会在中途失败时留下「入了一半」的账。
+	Items []menu.InventoryItem `json:"items"`
 }
 
 // handleInventory 读/写家庭库存账本，给前端「库存」界面用。
@@ -499,8 +535,10 @@ func (s *server) handleInventory(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodGet:
+		// 带新鲜度下发（派生字段，现算不落盘），并已按「越该吃越靠前」排好——
+		// 前端直接照序渲染就是家长最该先看的顺序。
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		if err := json.NewEncoder(w).Encode(ws.inv.List(r.URL.Query().Get("keyword"))); err != nil {
+		if err := json.NewEncoder(w).Encode(ws.inv.ListFresh(r.URL.Query().Get("keyword"))); err != nil {
 			log.Printf("/api/inventory 编码失败: %v", err)
 		}
 	case http.MethodPost:
@@ -515,10 +553,33 @@ func (s *server) handleInventory(w http.ResponseWriter, r *http.Request) {
 			_, err = ws.inv.Set(req.Name, req.Quantity, req.Unit)
 		case "add":
 			_, err = ws.inv.Add(req.Name, req.Quantity, req.Unit)
+		case "add_batch":
+			// 【先全校验、再全写入】：中途 400 会留下「入了一半」的账，而家长在确认页
+			// 看到的是完整一批，回头根本对不上。Add 的失败面只有空名和非正份数，
+			// 提前挡掉就等于这一批要么全进要么全不进（除非落盘本身出错，那是另一回事）。
+			if len(req.Items) == 0 {
+				http.Error(w, "items 为空，没有可入库的条目", http.StatusBadRequest)
+				return
+			}
+			for _, it := range req.Items {
+				if strings.TrimSpace(it.Name) == "" {
+					http.Error(w, "有条目的食材名为空", http.StatusBadRequest)
+					return
+				}
+				if it.Quantity <= 0 {
+					http.Error(w, "「"+it.Name+"」的份数必须大于 0", http.StatusBadRequest)
+					return
+				}
+			}
+			for _, it := range req.Items {
+				if _, err = ws.inv.Add(it.Name, it.Quantity, it.Unit); err != nil {
+					break
+				}
+			}
 		case "remove":
 			err = ws.inv.Remove(req.Name)
 		default:
-			http.Error(w, "op 只能是 set/add/remove，收到 "+req.Op, http.StatusBadRequest)
+			http.Error(w, "op 只能是 set/add/add_batch/remove，收到 "+req.Op, http.StatusBadRequest)
 			return
 		}
 		if err != nil {
@@ -527,7 +588,8 @@ func (s *server) handleInventory(w http.ResponseWriter, r *http.Request) {
 		}
 		// 回整份账本，前端直接刷新。
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		if err := json.NewEncoder(w).Encode(ws.inv.List("")); err != nil {
+		// 和 GET 同一个形状（带新鲜度）——前端写后直接替换列表，不用为两种响应写两套解码。
+		if err := json.NewEncoder(w).Encode(ws.inv.ListFresh("")); err != nil {
 			log.Printf("/api/inventory 写后编码失败: %v", err)
 		}
 	default:
@@ -577,6 +639,50 @@ func (s *server) handleParseOrderImage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	if err := json.NewEncoder(w).Encode(items); err != nil {
 		log.Printf("/api/inventory/parse-image 编码失败: %v", err)
+	}
+}
+
+// parseTextRequest 是「一句话入库」的请求体：家长说的那句话（多为语音转写）。
+type parseTextRequest struct {
+	Text string `json:"text"`
+}
+
+// handleParseInventoryText 把家长的一句话解析成库存条目列表，返回给前端【预览确认】——
+// 本端点【不写库存】，口径和 handleParseOrderImage 完全一致：解析结果必须过一遍家长的眼睛。
+//
+// 走 s.chat（文本模型）而不是 s.vision：这是纯文字抽取，用视觉模型既贵又没必要。
+func (s *server) handleParseInventoryText(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "只支持 POST", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.chat == nil {
+		http.Error(w, "文本模型未配置，暂不支持一句话入库", http.StatusServiceUnavailable)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	var req parseTextRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "请求体不是合法 JSON："+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.Text) == "" {
+		http.Error(w, "缺少文字（text 为空）", http.StatusBadRequest)
+		return
+	}
+
+	// 一次纯抽取，比视觉快得多；30s 足够，超了多半是网关有问题。
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	items, err := menu.ParseInventoryText(ctx, s.chat, req.Text)
+	if err != nil {
+		http.Error(w, "解析失败："+err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if err := json.NewEncoder(w).Encode(items); err != nil {
+		log.Printf("/api/inventory/parse-text 编码失败: %v", err)
 	}
 }
 

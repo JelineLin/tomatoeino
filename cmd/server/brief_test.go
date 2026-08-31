@@ -6,6 +6,8 @@ package main
 import (
 	"testing"
 	"time"
+
+	"tomatoeino/internal/menu"
 )
 
 func TestParseClock(t *testing.T) {
@@ -65,5 +67,62 @@ func TestBriefStore(t *testing.T) {
 	b.set(d)
 	if got := b.get(); got == nil || got.Date != "2026-07-06" {
 		t.Errorf("存取不一致：%+v", got)
+	}
+}
+
+// briefStore.replaceDish：换对位置、不污染旧快照、边界一律拒绝。
+func TestBriefStore_ReplaceDish(t *testing.T) {
+	newStore := func() *briefStore {
+		b := &briefStore{}
+		b.set(&dailyBrief{
+			Date: "2026-08-10",
+			Menu: &menu.RecommendedMenu{
+				Date: "2026-08-10",
+				Meals: []menu.ProposedMeal{
+					{Meal: "lunch", Dishes: []menu.Dish{{Name: "番茄面"}, {Name: "炒西兰花"}}},
+					{Meal: "dinner", Dishes: []menu.Dish{{Name: "鳕鱼羹"}}},
+				},
+			},
+		})
+		return b
+	}
+
+	// 换 lunch 的第 1 道，其余原样。
+	b := newStore()
+	before := b.get().Menu // 换之前的快照，下面要验证它没被就地改掉
+	nm := b.replaceDish("2026-08-10", "lunch", 1, menu.Dish{Name: "蒸南瓜"})
+	if nm == nil {
+		t.Fatal("合法替换不该返回 nil")
+	}
+	if got := nm.Meals[0].Dishes[1].Name; got != "蒸南瓜" {
+		t.Errorf("第 1 道应换成蒸南瓜，实际 %s", got)
+	}
+	if got := nm.Meals[0].Dishes[0].Name; got != "番茄面" {
+		t.Errorf("第 0 道不该动，实际 %s", got)
+	}
+	if got := nm.Meals[1].Dishes[0].Name; got != "鳕鱼羹" {
+		t.Errorf("dinner 不该动，实际 %s", got)
+	}
+	// 切片克隆：旧快照必须还是旧内容（copy 出来的 ProposedMeal 与旧的共用底层数组，
+	// 不克隆 Dishes 就会把已经交出去的那份一起改掉）。
+	if got := before.Meals[0].Dishes[1].Name; got != "炒西兰花" {
+		t.Errorf("旧快照被就地改了：%s", got)
+	}
+
+	// 边界：日期对不上、餐别不存在、下标越界，一律不动。
+	for _, c := range []struct {
+		desc       string
+		date, meal string
+		idx        int
+	}{
+		{"日期对不上", "2026-08-11", "lunch", 0},
+		{"餐别不存在", "2026-08-10", "breakfast", 0},
+		{"下标越界", "2026-08-10", "lunch", 2},
+		{"下标为负", "2026-08-10", "lunch", -1},
+	} {
+		b := newStore()
+		if got := b.replaceDish(c.date, c.meal, c.idx, menu.Dish{Name: "X"}); got != nil {
+			t.Errorf("%s 时应返回 nil，实际换成了 %+v", c.desc, got.Meals)
+		}
 	}
 }
