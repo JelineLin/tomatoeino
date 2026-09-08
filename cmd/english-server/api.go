@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	"tomatoeino/internal/english"
+	"tomato-platform/internal/english"
 )
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

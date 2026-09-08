@@ -25,8 +25,8 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/flow/agent/react"
 
-	"tomatoeino/internal/menu"
-	"tomatoeino/internal/vectorstore"
+	"tomato-platform/internal/menu"
+	"tomato-platform/internal/vectorstore"
 )
 
 // workspace 是一个用户的完整世界。

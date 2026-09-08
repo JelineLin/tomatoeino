@@ -11,7 +11,7 @@ import (
 	"github.com/cloudwego/eino/flow/agent/react"
 	"github.com/cloudwego/eino/schema"
 
-	"tomatoeino/internal/vectorstore"
+	"tomato-platform/internal/vectorstore"
 )
 
 // systemPersona 是 agent 的人设 + 决策口径。

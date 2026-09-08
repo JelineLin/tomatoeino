@@ -12,7 +12,7 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 
-	"tomatoeino/internal/llm"
+	"tomato-platform/internal/llm"
 )
 
 type LessonGenerator interface {

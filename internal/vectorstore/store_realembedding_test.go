@@ -7,8 +7,8 @@ import (
 
 	"github.com/cloudwego/eino/schema"
 
-	"tomatoeino/internal/llm"
-	"tomatoeino/internal/vectorstore"
+	"tomato-platform/internal/llm"
+	"tomato-platform/internal/vectorstore"
 )
 
 // TestRealEmbedding 用「真」OpenAI embedding 跑一遍同一个 Store，

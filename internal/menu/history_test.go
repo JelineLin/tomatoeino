@@ -12,7 +12,7 @@ import (
 
 	"github.com/cloudwego/eino/components/embedding"
 
-	"tomatoeino/internal/vectorstore"
+	"tomato-platform/internal/vectorstore"
 )
 
 // storeFromDays 是白盒帮手：直接用现成切片造一个只读 HistoryStore，

@@ -20,7 +20,7 @@ REMOTE   := /opt/menuagent/server
 # 2026-07-16 起走 TLS+域名（8080 明文口已封），healthz 也从这里探。
 HEALTH   := https://jelinelin.com/healthz
 
-.PHONY: build test vet linux release deploy web deploy-web english-build english-linux english-web desktop-test desktop-build clean
+.PHONY: build test vet linux release deploy web deploy-web account-build english-build english-linux english-web desktop-test desktop-build clean
 
 build:
 	go build ./...
@@ -30,6 +30,9 @@ test:
 
 vet:
 	go vet ./...
+
+account-build:
+	go build ./cmd/account-server
 
 # 交叉编译 linux 二进制（hermas 是 x86_64 Ubuntu；CGO 关掉保证纯静态、免装依赖）。
 linux:

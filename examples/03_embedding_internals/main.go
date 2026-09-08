@@ -25,7 +25,7 @@ import (
 	"math"
 	"os"
 
-	"tomatoeino/internal/llm"
+	"tomato-platform/internal/llm"
 )
 
 func main() {

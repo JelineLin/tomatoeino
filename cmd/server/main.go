@@ -36,8 +36,8 @@ import (
 	"github.com/cloudwego/eino/flow/agent/react"
 	"github.com/cloudwego/eino/schema"
 
-	"tomatoeino/internal/llm"
-	"tomatoeino/internal/menu"
+	"tomato-platform/internal/llm"
+	"tomato-platform/internal/menu"
 )
 
 // server 持有 workspace 注册表——每个用户一整套 agent/账本/会话/简报，

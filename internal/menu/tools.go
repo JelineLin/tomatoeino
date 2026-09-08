@@ -11,7 +11,7 @@ import (
 	"github.com/cloudwego/eino/components/tool/utils"
 	"github.com/cloudwego/eino/schema"
 
-	"tomatoeino/internal/vectorstore"
+	"tomato-platform/internal/vectorstore"
 )
 
 // searchTopK 是 search_meal_history 默认召回多少条。检索是「给模型候选」，

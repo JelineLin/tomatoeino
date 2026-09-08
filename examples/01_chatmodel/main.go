@@ -22,7 +22,7 @@ import (
 
 	"github.com/cloudwego/eino/schema"
 
-	"tomatoeino/internal/llm"
+	"tomato-platform/internal/llm"
 )
 
 func main() {

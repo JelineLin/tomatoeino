@@ -37,7 +37,7 @@ import (
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 
-	"tomatoeino/internal/llm"
+	"tomato-platform/internal/llm"
 )
 
 // ---------- 玩具工具：数据写死在内存里，注意力全留给图 ----------

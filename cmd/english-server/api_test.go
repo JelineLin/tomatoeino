@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"tomatoeino/internal/english"
+	"tomato-platform/internal/english"
 )
 
 func TestAudioExtUsesMagicNotClientName(t *testing.T) {

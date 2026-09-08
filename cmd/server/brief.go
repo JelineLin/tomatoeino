@@ -26,7 +26,7 @@ import (
 
 	"github.com/cloudwego/eino/schema"
 
-	"tomatoeino/internal/menu"
+	"tomato-platform/internal/menu"
 )
 
 // briefPrompt 是定时任务喂给 agent 的固定指令。

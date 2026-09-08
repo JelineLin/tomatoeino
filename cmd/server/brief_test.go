@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"tomatoeino/internal/menu"
+	"tomato-platform/internal/menu"
 )
 
 func TestParseClock(t *testing.T) {

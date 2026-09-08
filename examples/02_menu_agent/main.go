@@ -22,8 +22,8 @@ import (
 
 	"github.com/cloudwego/eino/schema"
 
-	"tomatoeino/internal/llm"
-	"tomatoeino/internal/menu"
+	"tomato-platform/internal/llm"
+	"tomato-platform/internal/menu"
 )
 
 const historyPath = "examples/02_menu_agent/data/history.json"

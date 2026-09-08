@@ -4,7 +4,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 ## What this is
 
-A personal learning project for the [CloudWeGo **eino**](https://github.com/cloudwego/eino) LLM application framework (Go). Code is organized as a series of numbered, self-contained examples under `examples/`, each demonstrating one eino concept. Comments are in Chinese and frequently draw analogies to FinTech systems (LP clients, RPC, SSE, settlement) — keep that explanatory, analogy-driven style when adding code.
+A multi-product AI application platform containing Menu Agent and English Coach, while retaining a series of numbered, self-contained [CloudWeGo **eino**](https://github.com/cloudwego/eino) learning examples under `examples/`. Comments are in Chinese and frequently draw analogies to FinTech systems (LP clients, RPC, SSE, settlement) — keep that explanatory, analogy-driven style when adding code.
 
 ## Setup & commands
 
@@ -32,7 +32,7 @@ go test -v -run RealEmbedding ./internal/vectorstore/   # the one test that hits
 
 Most tests use a hand-rolled `fakeEmbedder` (word-count vectors) so they run offline and free. The `RealEmbedding` test actually calls the OpenAI embedding API and **self-skips when `OPENAI_API_KEY` is unset** — so a bare `go test ./...` is always safe and offline.
 
-There is no Makefile. In VS Code, use the "Debug 01_chatmodel" or "Debug current package" launch configs (`.vscode/launch.json`) — both pin `cwd` to the repo root and inject `.env`.
+The repository includes a Makefile for builds, tests and deployments. In VS Code, use the "Debug 01_chatmodel" or "Debug current package" launch configs (`.vscode/launch.json`) — both pin `cwd` to the repo root and inject `.env`.
 
 ## Architecture
 

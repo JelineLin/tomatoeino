@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"tomatoeino/internal/english"
+	"tomato-platform/internal/english"
 )
 
 func runGenerateToday(ctx context.Context) error {

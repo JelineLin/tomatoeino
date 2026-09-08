@@ -1,9 +1,8 @@
-# tomatoeino
+# tomato-platform
 
-学习 [CloudWeGo **eino**](https://github.com/cloudwego/eino)（Go 的 LLM 应用框架）的练手仓库。
-`examples/` 下是一组逐个递进的小例子；在此之上，把「幼儿备餐」做成了一个完整的
-**ReAct agent 后端 + SwiftUI iOS 前端**，并在同一 monorepo 中提供独立部署的
-**English Coach 后端 + Web App + Wails macOS 桌面端**。
+统一账号下的多产品 AI 应用平台。当前包含「幼儿备餐」和「English Coach」两个
+独立产品，并保留一组用于学习 [CloudWeGo **eino**](https://github.com/cloudwego/eino)
+（Go 的 LLM 应用框架）的递进示例。
 
 ## 这是 agent，不是 AIGC
 
@@ -18,8 +17,10 @@
 
 ```
 internal/llm/         连模型的唯一出口：NewChatModel / NewToolCallingChatModel / NewEmbedder
+internal/platformdb/  PostgreSQL 连接基础设施（只连库，不自动执行 migration）
 internal/vectorstore/ 从零写的内存向量库（cosine 检索），实现 eino 的 retriever.Retriever
 internal/menu/        备餐 agent 业务核心：领域类型 + 知识库 + 工具 + ReAct 装配
+cmd/account-server/   统一身份与客户平台入口，默认监听 :8460
 cmd/server/           HTTP 后端：SSE 流式 /api/chat + REST /api/history + /healthz
 internal/english/     英语课程、SQLite 学习账本、进度规则、转写对齐与模型生成
 cmd/english-server/   独立 English Coach API / generate-today 命令，默认监听 :8450
@@ -27,7 +28,31 @@ english-web/          独立 Next.js 静态前端（今日课程、朗读、历�
 desktop/              Wails macOS 桌面壳（内嵌 Web UI，安全代理到同一个 English 后端）
 examples/02_menu_agent/  同一个 agent 的命令行版 demo
 ios/MenuAgent/        SwiftUI App（聊天 tab + 历史 tab），完整 Xcode 工程
+migrations/postgres/  PostgreSQL 版本化 migration（生产环境由开发者手动执行）
 ```
+
+## 统一账号平台（建设中）
+
+平台统一使用 PostgreSQL 保存身份、客户、家庭、产品权限、授权、设备会话和审计数据。
+第一版 migration 已放在 `migrations/postgres/`；业务进程不会在启动时自动改表。
+
+首次建库时，由开发者确认目标数据库后手动执行：
+
+```bash
+psql "$PLATFORM_DATABASE_URL" -f migrations/postgres/000001_account.up.sql
+```
+
+当前 `account-server` 已提供：
+
+- `POST /v1/auth/apple/challenges`：签发一次性 nonce，防止 Apple 凭证重放；
+- `POST /v1/auth/apple`：校验 Apple 签名、issuer、audience、有效期和 nonce，并创建统一账户；
+- `POST /v1/auth/refresh`：轮换一次性 Refresh Token；
+- `GET /v1/me` 与 `POST /v1/auth/logout`：查询统一身份和撤销设备会话；
+- `/healthz` 与 `/readyz`：进程和 PostgreSQL 就绪探针。
+
+Refresh Token 只把 SHA-256 摘要写入 PostgreSQL，原文只在签发响应中返回。Apple
+authorization code 换取/安全保存 Apple refresh token、账号删除时向 Apple 撤销授权，
+以及旧 `API_TOKEN` 用户映射仍属于后续阶段，当前版本还不能视为 App Store 认证闭环。
 
 ## 跑起来
 
@@ -43,6 +68,12 @@ cp .env.example .env   # 填入 OPENAI_API_KEY 等（chat + embedding 凭证，�
 
 ```bash
 go run ./cmd/server          # 默认监听 :8080，可用 PORT 覆盖
+```
+
+统一账号平台基础进程：
+
+```bash
+go run ./cmd/account-server  # 默认 :8460，需要 PLATFORM_DATABASE_URL、ACCOUNT_TOKEN_SECRET、APPLE_CLIENT_IDS
 ```
 
 冒烟自测：

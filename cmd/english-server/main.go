@@ -1,4 +1,4 @@
-// english-server 是 tomatoeino 的第二个独立进程。
+// english-server 是 tomato-platform 的 English Coach 独立进程。
 // 它复用 internal/llm 和同一套 Ark 凭证，但有自己的模型、提示词、SQLite、录音和前端。
 package main
 
@@ -17,7 +17,7 @@ import (
 	"syscall"
 	"time"
 
-	"tomatoeino/internal/english"
+	"tomato-platform/internal/english"
 )
 
 type server struct {
