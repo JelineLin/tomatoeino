@@ -21,6 +21,7 @@ import (
 
 	"tomato-platform/internal/account"
 	"tomato-platform/internal/platformdb"
+	"tomato-platform/internal/platformpurge"
 )
 
 type databasePinger interface {
@@ -84,7 +85,11 @@ func run() error {
 
 	accountStore := account.NewPostgresStore(pool)
 	accountService := account.NewService(accountStore, appleVerifier, appleTokens, dataCipher, tokens)
-	deletionWorker := account.NewDeletionWorker(accountStore, appleTokens, dataCipher)
+	purgers, err := productPurgers(os.Getenv("PLATFORM_INTERNAL_TOKEN"))
+	if err != nil {
+		return err
+	}
+	deletionWorker := account.NewDeletionWorker(accountStore, appleTokens, dataCipher, purgers...)
 	srv := &server{db: pool, schema: accountStore, account: accountService}
 	httpServer := &http.Server{
 		Addr:              ":" + envOr("ACCOUNT_PORT", "8460"),
@@ -117,6 +122,34 @@ func run() error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return httpServer.Shutdown(shutdownCtx)
+}
+
+// productPurgers 按环境变量组装各业务产品的清除客户端。
+//
+// 少配一个产品就意味着那个产品的数据在删号后永远留着，所以这里把「没配」
+// 大声喊出来：能起服（本地开发根本没有业务进程），但日志上不给它藏身之处。
+// 配了地址却没有共享密钥则直接拒绝启动——那是配置写了一半的状态，
+// 悄悄降级成不清除比起不来更危险。
+func productPurgers(internalToken string) ([]account.ProductPurger, error) {
+	targets := []struct{ product, baseURL string }{
+		{product: "menu", baseURL: os.Getenv("MENU_BASE_URL")},
+		{product: "english", baseURL: os.Getenv("ENGLISH_BASE_URL")},
+	}
+	var purgers []account.ProductPurger
+	for _, target := range targets {
+		if strings.TrimSpace(target.baseURL) == "" {
+			log.Printf("⚠️  未配置 %s_BASE_URL，删号不会清除 %s 的业务数据",
+				strings.ToUpper(target.product), target.product)
+			continue
+		}
+		client, err := platformpurge.NewClient(target.product, target.baseURL, internalToken, nil)
+		if err != nil {
+			return nil, fmt.Errorf("配置 %s 数据清除失败: %w", target.product, err)
+		}
+		purgers = append(purgers, client)
+		log.Printf("🗑️  删号将联动清除 %s 的业务数据", target.product)
+	}
+	return purgers, nil
 }
 
 func (s *server) routes() http.Handler {

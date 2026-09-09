@@ -27,6 +27,14 @@ type DeletionJob struct {
 	Credentials  []AppleCredential `json:"-"`
 }
 
+// ProductPurger 是一个业务产品的数据清除入口（由 internal/platformpurge 实现）。
+// 账号是平台的，业务数据却在各产品自己的进程里，硬删除账户前必须逐个清干净——
+// 清不掉就整单重试，绝不允许「账户没了、业务数据成孤儿」。
+type ProductPurger interface {
+	Product() string
+	Purge(context.Context, string) error
+}
+
 type DeletionStore interface {
 	ClaimDeletionJob(context.Context, time.Time) (DeletionJob, error)
 	CompleteDeletion(context.Context, DeletionJob, string) error
@@ -37,11 +45,15 @@ type DeletionWorker struct {
 	store       DeletionStore
 	appleTokens AppleTokenService
 	cipher      *TokenCipher
+	purgers     []ProductPurger
 	now         func() time.Time
 }
 
-func NewDeletionWorker(store DeletionStore, appleTokens AppleTokenService, cipher *TokenCipher) *DeletionWorker {
-	return &DeletionWorker{store: store, appleTokens: appleTokens, cipher: cipher, now: time.Now}
+// NewDeletionWorker 组装删除工作者。purgers 是本部署接入的业务产品；一个都不配
+// 时删除仍会完成（本地开发没有业务进程），但会在任务备注里留下痕迹，
+// 免得「以为删干净了」这件事无声无息地发生。
+func NewDeletionWorker(store DeletionStore, appleTokens AppleTokenService, cipher *TokenCipher, purgers ...ProductPurger) *DeletionWorker {
+	return &DeletionWorker{store: store, appleTokens: appleTokens, cipher: cipher, purgers: purgers, now: time.Now}
 }
 
 func (w *DeletionWorker) Run(ctx context.Context) {
@@ -75,7 +87,7 @@ func (w *DeletionWorker) ProcessOne(ctx context.Context) (bool, error) {
 		return false, err
 	}
 
-	notes := make([]string, 0, len(job.Credentials))
+	notes := make([]string, 0, len(job.Credentials)+1)
 	for _, credential := range job.Credentials {
 		refreshToken, err := w.cipher.OpenFor(
 			appleCredentialAAD(credential.Subject, credential.ClientID),
@@ -90,18 +102,37 @@ func (w *DeletionWorker) ProcessOne(ctx context.Context) (bool, error) {
 			continue
 		}
 		if err != nil {
-			retryAt := now.Add(deletionRetryDelay(job.AttemptCount))
-			message := truncateError(err, 1000)
-			if retryErr := w.store.RetryDeletion(ctx, job, retryAt, message); retryErr != nil {
-				return true, fmt.Errorf("删除任务失败且保存重试状态失败: %v; 原因: %w", retryErr, err)
-			}
-			return true, fmt.Errorf("删除任务将在 %s 重试: %w", retryAt.Format(time.RFC3339), err)
+			return w.scheduleRetry(ctx, job, now, err)
 		}
 	}
+
+	// 业务数据必须先于账户数据清掉：account.users 一旦硬删，user_id 就只剩删除任务里
+	// 那份快照，任何一处漏清都再也没人认领。清不掉就整单退避重试——
+	// 各产品的清除接口是幂等的，重试会把已经清过的那几个安全地再走一遍。
+	if len(w.purgers) == 0 {
+		notes = append(notes, "no product purge target configured")
+	}
+	for _, purger := range w.purgers {
+		if err := purger.Purge(ctx, job.UserID); err != nil {
+			return w.scheduleRetry(ctx, job, now, err)
+		}
+	}
+
 	if err := w.store.CompleteDeletion(ctx, job, strings.Join(notes, "; ")); err != nil {
 		return true, err
 	}
 	return true, nil
+}
+
+// scheduleRetry 把这次失败写回任务并按退避排下一次。任务留在库里、账户仍是
+// deleting（会话已撤销），所以「删了一半」对用户始终表现为账号已不可用。
+func (w *DeletionWorker) scheduleRetry(ctx context.Context, job DeletionJob, now time.Time, cause error) (bool, error) {
+	retryAt := now.Add(deletionRetryDelay(job.AttemptCount))
+	message := truncateError(cause, 1000)
+	if retryErr := w.store.RetryDeletion(ctx, job, retryAt, message); retryErr != nil {
+		return true, fmt.Errorf("删除任务失败且保存重试状态失败: %v; 原因: %w", retryErr, cause)
+	}
+	return true, fmt.Errorf("删除任务将在 %s 重试: %w", retryAt.Format(time.RFC3339), cause)
 }
 
 func appleCredentialAAD(subject, clientID string) string {

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"tomato-platform/internal/english"
+	"tomato-platform/internal/platformpurge"
 )
 
 type server struct {
@@ -81,6 +82,16 @@ func runServer() error {
 	mux.HandleFunc("/api/english/weekly-reports", s.handleReports)
 	mux.HandleFunc("/api/english/profile", s.handleProfile)
 	mux.HandleFunc("/api/english/generate-today", s.handleGenerateToday)
+
+	// 账号删除的联动清除：认进程间共享密钥，不认用户会话，所以走 /internal/ 而非 /api/。
+	// 没配密钥就不挂载——宁可 404，也不留一个无密码的删除入口。
+	if purgeHandler, err := platformpurge.Handler(os.Getenv("PLATFORM_INTERNAL_TOKEN"), s.purgeUser); err == nil {
+		mux.Handle(platformpurge.Path, purgeHandler)
+		log.Printf("🗑️  账号删除联动清除接口已挂载：%s", platformpurge.Path)
+	} else {
+		log.Printf("⚠️  未配置 PLATFORM_INTERNAL_TOKEN，删号不会清除本服务的业务数据: %v", err)
+	}
+
 	mux.Handle("/", spaHandler(envOr("ENGLISH_WEB_DIR", filepath.Join("english-web", "out"))))
 	httpServer := &http.Server{Addr: ":" + envOr("ENGLISH_PORT", "8450"), Handler: withCORS(withAuth(users, accountAuth, mux)), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 12 * time.Minute, WriteTimeout: 12 * time.Minute, IdleTimeout: 90 * time.Second}
 	sigctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

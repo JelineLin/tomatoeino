@@ -48,6 +48,8 @@ type registry struct {
 	m        map[string]*workspace
 	building map[string]chan struct{} // 手写 singleflight：防同一用户并发首访重复构建
 
+	purged map[string]struct{} // 已被账号删除清掉的租户墓碑：本进程内永不再建
+
 	dataDir  string
 	users    *userRegistry // 合法 uid 的裁判（nil = 单用户本地模式，只认 defaultUserID）
 	platform bool          // 是否接受已由 account-server 验证的 UUID 用户
@@ -59,6 +61,7 @@ func newRegistry(dataDir string, users *userRegistry, platform bool, embedder em
 	return &registry{
 		m:        map[string]*workspace{},
 		building: map[string]chan struct{}{},
+		purged:   map[string]struct{}{},
 		dataDir:  dataDir,
 		users:    users,
 		platform: platform,
@@ -73,6 +76,14 @@ func newRegistry(dataDir string, users *userRegistry, platform bool, embedder em
 func (r *registry) legalUID(uid string) error {
 	if uid == "" {
 		return fmt.Errorf("拒绝空 userID——请求没有经过鉴权中间件？")
+	}
+	r.mu.Lock()
+	_, tombstoned := r.purged[uid]
+	r.mu.Unlock()
+	if tombstoned {
+		// 账号已被平台删除。此刻正在飞行中的请求不许再把这户建回来，
+		// 否则删完又冒出一个空 workspace，还会被简报调度当成活人天天生成。
+		return fmt.Errorf("用户 %q 的数据已随账号删除清除", uid)
 	}
 	if r.users != nil {
 		if _, ok := r.users.names[uid]; ok {
@@ -169,6 +180,30 @@ func (r *registry) build(ctx context.Context, uid string) (*workspace, error) {
 	}, nil
 }
 
+// purge 清掉一个租户的全部业务数据——account-server 硬删除账户前会调它。
+// 幂等：这户从没来过、目录本就不存在，也算清干净了（删除任务会重试，
+// 重试必须能安全地再走一遍）。
+//
+// 顺序是先立墓碑再删盘：反过来的话，正在飞行中的请求可能在删完之后又把
+// 目录写回来。墓碑只活在本进程内存里，重启后账号在 account-server 那边
+// 早已不存在，token 也就换不到身份，不需要持久化。
+func (r *registry) purge(uid string) error {
+	if !canonicalUUID(uid) {
+		return fmt.Errorf("拒绝清除非规范 UUID %q", uid)
+	}
+	r.mu.Lock()
+	r.purged[uid] = struct{}{}
+	delete(r.m, uid)
+	r.mu.Unlock()
+
+	dir := filepath.Join(r.dataDir, "users", uid)
+	if err := os.RemoveAll(dir); err != nil {
+		return fmt.Errorf("删除用户 %s 的数据目录失败: %w", uid, err)
+	}
+	log.Printf("🗑️  已清除用户 %s 的全部备餐数据（%s）", uid, dir)
+	return nil
+}
+
 // forEach 遍历所有已构建的 workspace（会话清扫等全局巡检用）。
 // 回调在锁外执行，遍历的是快照——巡检不该阻塞新用户构建。
 func (r *registry) forEach(f func(uid string, ws *workspace)) {
@@ -220,8 +255,7 @@ func (r *registry) allUIDs() []string {
 // 目录名是外部来源，所以用 legalUID 的同一把尺子再量一遍，非 UUID 的目录
 // （旧的 home 等）留给 users.json 那条线，不在这里冒充平台租户。
 //
-// 已知债：账号删除目前只清账户域数据，业务数据的联动删除还没做——所以被删账号
-// 的目录还会留在这里被简报调度扫到。等联动删除落地，这份名册自然收敛。
+// 名册的收敛靠 purge：账号删除时目录整个删掉，这里自然就扫不到了。
 func (r *registry) platformUIDsOnDisk() []string {
 	entries, err := os.ReadDir(filepath.Join(r.dataDir, "users"))
 	if err != nil {

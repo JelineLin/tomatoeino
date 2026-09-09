@@ -19,6 +19,7 @@
 internal/llm/         连模型的唯一出口：NewChatModel / NewToolCallingChatModel / NewEmbedder
 internal/platformdb/  PostgreSQL 连接基础设施（只连库，不自动执行 migration）
 internal/platformauth/ 业务服务通过 account-server 实时校验统一会话与产品权限
+internal/platformpurge/ 账号删除的跨进程清除链：账户侧发起、产品侧承接（共用一套语义）
 internal/vectorstore/ 从零写的内存向量库（cosine 检索），实现 eino 的 retriever.Retriever
 internal/menu/        备餐 agent 业务核心：领域类型 + 知识库 + 工具 + ReAct 装配
 cmd/account-server/   统一身份与客户平台入口，默认监听 :8460
@@ -50,7 +51,7 @@ psql "$PLATFORM_DATABASE_URL" -f migrations/postgres/000002_apple_credentials_an
 - `POST /v1/auth/apple`：校验身份令牌和 authorization code、加密保存 Apple refresh token，并创建统一账户；
 - `POST /v1/auth/refresh`：轮换一次性 Refresh Token；
 - `GET /v1/me` 与 `POST /v1/auth/logout`：查询统一身份和撤销设备会话；
-- `DELETE /v1/me`：立即冻结账号和全部会话，后台逐一撤销 Apple 授权后硬删除账户数据；
+- `DELETE /v1/me`：立即冻结账号和全部会话，后台撤销 Apple 授权、清除各产品业务数据，最后硬删除账户数据；
 - `/healthz` 与 `/readyz`：进程和 PostgreSQL 就绪探针。
 
 配置 `ACCOUNT_BASE_URL` 后，Menu Agent 与 English Coach 都接受平台 Access Token：业务请求
@@ -59,10 +60,19 @@ psql "$PLATFORM_DATABASE_URL" -f migrations/postgres/000002_apple_credentials_an
 平台用户没有本地名册，`DATA_DIR/users/<uuid>/` 这份数据本身就是名册——每日简报和启动预热
 按它逐户执行，重启后当天没来过的平台用户照样收得到早简报。
 
+删除账号会连业务数据一起清干净：`DELETE /v1/me` 先冻结账号、撤销全部会话，后台任务
+逐一撤销 Apple 授权，再按 `MENU_BASE_URL` / `ENGLISH_BASE_URL` 调各产品的
+`DELETE /internal/v1/users/<uuid>`（认 `PLATFORM_INTERNAL_TOKEN` 共享密钥，不认用户会话），
+**全部清除成功之后**才硬删账户数据——顺序反了的话，`account.users` 一没，业务数据就成了
+没人认领的孤儿。任何一步失败都整单退避重试，各产品的清除接口因此都是幂等的：
+Menu 删掉 `DATA_DIR/users/<uuid>/` 并给该租户立墓碑（飞行中的请求不许把它建回来），
+English 在一个事务里删掉九张表的记录并连录音文件一起清除。`/internal/` 只该走本机环回，
+反向代理要挡掉（见 `deploy/nginx-english.conf`）。
+
 平台 Refresh Token 只把 SHA-256 摘要写入 PostgreSQL，原文只在签发响应中返回。Apple
 refresh token 使用 AES-256-GCM 加密，并绑定 Apple subject 与 Client ID；账号删除任务采用
-数据库租约和退避重试，Apple 撤销成功后才删除账户域数据。Menu Agent / English Coach
-业务数据迁移与联动删除、旧 `API_TOKEN` 用户映射和客户端登录界面仍属于后续阶段，因此当前版本还不能上架。
+数据库租约和退避重试。旧 `API_TOKEN` 用户到平台账户的映射迁移、客户端登录界面
+和 account-server 本身的部署仍属于后续阶段，因此当前版本还不能上架。
 
 若两个 App 要自然识别为同一 Apple 用户，需要在 Apple Developer 后台将两个 App ID 配置到
 同一个 Sign in with Apple primary app / app group；不能用邮箱（包括私密转发邮箱）猜测合并账户。

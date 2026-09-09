@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -120,4 +121,72 @@ func testDeletionCipher(t *testing.T) *TokenCipher {
 		t.Fatal(err)
 	}
 	return cipher
+}
+
+type fakePurger struct {
+	product string
+	calls   []string
+	err     error
+}
+
+func (f *fakePurger) Product() string { return f.product }
+func (f *fakePurger) Purge(_ context.Context, userID string) error {
+	f.calls = append(f.calls, userID)
+	return f.err
+}
+
+// 删除的先后顺序是这条链的命门：业务数据清干净之后，账户数据才可以硬删。
+func TestDeletionWorkerPurgesProductsBeforeHardDelete(t *testing.T) {
+	store := &fakeDeletionStore{job: DeletionJob{ID: "job-1", UserID: "user-1", AttemptCount: 1}}
+	menu := &fakePurger{product: "menu"}
+	english := &fakePurger{product: "english"}
+	worker := NewDeletionWorker(store, &fakeRevoker{}, testDeletionCipher(t), menu, english)
+
+	handled, err := worker.ProcessOne(context.Background())
+	if !handled || err != nil {
+		t.Fatalf("ProcessOne() = %v, %v", handled, err)
+	}
+	if len(menu.calls) != 1 || menu.calls[0] != "user-1" || len(english.calls) != 1 {
+		t.Fatalf("两个产品都应被清除: menu=%v english=%v", menu.calls, english.calls)
+	}
+	if !store.completed {
+		t.Fatal("产品清除成功后应完成账号删除")
+	}
+}
+
+// 任一产品清不掉就整单重试，绝不能把账户先删了——那样业务数据会变成没人认领的孤儿。
+func TestDeletionWorkerRetriesWhenProductPurgeFails(t *testing.T) {
+	store := &fakeDeletionStore{job: DeletionJob{ID: "job-1", UserID: "user-1", AttemptCount: 2}}
+	failing := &fakePurger{product: "english", err: errors.New("english 不可达")}
+	worker := NewDeletionWorker(store, &fakeRevoker{}, testDeletionCipher(t), failing)
+
+	handled, err := worker.ProcessOne(context.Background())
+	if !handled || err == nil {
+		t.Fatalf("ProcessOne() = %v, %v", handled, err)
+	}
+	if store.completed {
+		t.Fatal("产品清除失败时绝不能硬删账户")
+	}
+	if !store.retried {
+		t.Fatal("产品清除失败应排重试")
+	}
+	if !strings.Contains(store.retryMsg, "english") {
+		t.Errorf("重试原因应留下是哪个产品失败了: %q", store.retryMsg)
+	}
+}
+
+// 没配任何产品清除目标时删除照常完成（本地开发场景），但必须在任务备注里留痕。
+func TestDeletionWorkerNotesMissingPurgeTargets(t *testing.T) {
+	store := &fakeDeletionStore{job: DeletionJob{ID: "job-1", UserID: "user-1", AttemptCount: 1}}
+	worker := NewDeletionWorker(store, &fakeRevoker{}, testDeletionCipher(t))
+
+	if _, err := worker.ProcessOne(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !store.completed {
+		t.Fatal("没有产品目标时删除仍应完成")
+	}
+	if !strings.Contains(store.note, "no product purge target") {
+		t.Errorf("备注应说明没有配置清除目标: %q", store.note)
+	}
 }

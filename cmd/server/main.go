@@ -39,6 +39,7 @@ import (
 	"tomato-platform/internal/llm"
 	"tomato-platform/internal/menu"
 	"tomato-platform/internal/platformauth"
+	"tomato-platform/internal/platformpurge"
 )
 
 // server 持有 workspace 注册表——每个用户一整套 agent/账本/会话/简报，
@@ -135,6 +136,18 @@ func main() {
 	mux.HandleFunc("/api/inventory/parse-text", srv.handleParseInventoryText)
 	mux.HandleFunc("/api/profile", srv.handleProfile)
 	mux.HandleFunc("/api/chat", srv.handleChat)
+
+	// 账号删除的联动清除：account-server 硬删除账户前，用共享密钥调这里把这户的
+	// 备餐数据整个清掉。走 /internal/ 而不是 /api/——它认的是进程间密钥，不是用户会话。
+	// 没配 PLATFORM_INTERNAL_TOKEN 就干脆不挂载：宁可 404，也不留一个无密码的删除入口。
+	if purgeHandler, err := platformpurge.Handler(os.Getenv("PLATFORM_INTERNAL_TOKEN"), func(_ context.Context, uid string) error {
+		return reg.purge(uid)
+	}); err == nil {
+		mux.Handle(platformpurge.Path, purgeHandler)
+		log.Printf("🗑️  账号删除联动清除接口已挂载：%s", platformpurge.Path)
+	} else {
+		log.Printf("⚠️  未配置 PLATFORM_INTERNAL_TOKEN，删号不会清除本服务的业务数据: %v", err)
+	}
 
 	// 网页版（Next.js 静态导出产物）：无条件注册，目录在不在【每个请求现查】——
 	// 部署时序因此不敏感（先传二进制重启、后 rsync 静态文件也没事，文件一到下个请求就活）。

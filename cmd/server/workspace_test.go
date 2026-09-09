@@ -174,3 +174,46 @@ func TestRegistry_CacheAndIsolation(t *testing.T) {
 		t.Error("li 没记过账，不该有库存文件")
 	}
 }
+
+// 账号删除的联动清除：数据目录整个消失，而且本进程内不许再把这户建回来。
+func TestRegistry_PurgeWipesTenantAndTombstonesIt(t *testing.T) {
+	const uid = "c733a5d7-7b65-49ac-b6d2-872fd57a4ce6"
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	reg := newRegistry(dataDir, nil, true, stubEmbedder{}, stubChatModel{})
+
+	ws, err := reg.get(ctx, uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ws.inv.Add("鳕鱼", 2, "块"); err != nil { // 落一条真数据到磁盘
+		t.Fatal(err)
+	}
+	dir := filepath.Join(dataDir, "users", uid)
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("清除前数据目录应存在: %v", err)
+	}
+
+	if err := reg.purge(uid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("清除后数据目录仍在: %v", err)
+	}
+	if _, err := reg.get(ctx, uid); err == nil {
+		t.Error("已清除的租户不该被重新建出来——飞行中的请求会把数据写回去")
+	}
+	for _, listed := range reg.allUIDs() {
+		if listed == uid {
+			t.Error("已清除的租户不该再出现在简报名册里")
+		}
+	}
+
+	// 幂等：删除任务会重试；同时拒绝任何非规范 UUID，绝不按外部字符串去删目录。
+	if err := reg.purge(uid); err != nil {
+		t.Errorf("重复清除应幂等: %v", err)
+	}
+	if err := reg.purge("../../etc"); err == nil {
+		t.Error("非规范 UUID 必须拒绝，绝不能按它拼路径去删")
+	}
+}
