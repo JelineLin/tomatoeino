@@ -18,7 +18,7 @@ func TestPurgeRouteSurvivesAuthAndSPAWiring(t *testing.T) {
 	const uid = "c733a5d7-7b65-49ac-b6d2-872fd57a4ce6"
 	ctx := context.Background()
 	dataDir := t.TempDir()
-	reg := newRegistry(dataDir, nil, true, stubEmbedder{}, stubChatModel{})
+	reg := newRegistry(dataDir, nil, true, stubEmbedder{}, stubChatModel{}, nil)
 	if _, err := reg.get(ctx, uid); err != nil {
 		t.Fatal(err)
 	}

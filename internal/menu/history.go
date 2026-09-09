@@ -27,9 +27,11 @@ import (
 
 // HistoryStore 是带锁、带落盘的吃饭历史账本。
 type HistoryStore struct {
-	mu   sync.Mutex
-	path string
-	days []Day // 始终保持按 Date 升序
+	mu       sync.Mutex
+	path     string
+	days     []Day // 始终保持按 Date 升序
+	persist  func([]Day) error
+	disabled bool
 }
 
 // NewHistoryStore 打开（或新建）历史账本。文件不存在不算错——空历史，
@@ -77,9 +79,11 @@ func (s *HistoryStore) SetMeal(date, mealField string, m Meal) (stored *Meal, re
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	before := cloneDays(s.days)
 
 	stored, replaced = s.setMealLocked(date, mealField, m)
 	if err := s.save(); err != nil {
+		s.days = before
 		return stored, replaced, err
 	}
 	return stored, replaced, nil
@@ -181,6 +185,7 @@ func (s *HistoryStore) ImportDays(days []Day) (written []WrittenMeal, added, rep
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	before := cloneDays(s.days)
 
 	for _, d := range days {
 		date := strings.TrimSpace(d.Date)
@@ -205,6 +210,7 @@ func (s *HistoryStore) ImportDays(days []Day) (written []WrittenMeal, added, rep
 		return nil, 0, 0, nil // 没有可导入的有效餐——不落盘
 	}
 	if err := s.save(); err != nil {
+		s.days = before
 		return written, added, replaced, err
 	}
 	return written, added, replaced, nil
@@ -222,6 +228,7 @@ func (s *HistoryStore) SetFeedback(date, mealField string, fb *Feedback) (*Meal,
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	before := cloneDays(s.days)
 
 	idx := -1
 	for i := range s.days {
@@ -243,6 +250,7 @@ func (s *HistoryStore) SetFeedback(date, mealField string, fb *Feedback) (*Meal,
 	s.days[idx].setMeal(mealField, &clone)
 
 	if err := s.save(); err != nil {
+		s.days = before
 		return nil, err
 	}
 	return &clone, nil
@@ -265,6 +273,7 @@ func (s *HistoryStore) SetDishFeedback(date, mealField, dishName string, fb *Fee
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	before := cloneDays(s.days)
 
 	idx := -1
 	for i := range s.days {
@@ -304,6 +313,7 @@ func (s *HistoryStore) SetDishFeedback(date, mealField, dishName string, fb *Fee
 	s.days[idx].setMeal(mealField, &clone)
 
 	if err := s.save(); err != nil {
+		s.days = before
 		return nil, err
 	}
 	return &clone, nil
@@ -311,6 +321,12 @@ func (s *HistoryStore) SetDishFeedback(date, mealField, dishName string, fb *Fee
 
 // save 全量落盘：先留 .bak，再走临时文件 + rename 原子替换。调用方必须已持有锁。
 func (s *HistoryStore) save() error {
+	if s.disabled {
+		return fmt.Errorf("用户数据已停用")
+	}
+	if s.persist != nil {
+		return s.persist(cloneDays(s.days))
+	}
 	raw, err := json.MarshalIndent(s.days, "", "  ")
 	if err != nil {
 		return fmt.Errorf("序列化历史失败: %w", err)
@@ -341,4 +357,19 @@ func (s *HistoryStore) save() error {
 		return fmt.Errorf("落盘历史失败: %w", err)
 	}
 	return nil
+}
+
+// Disable waits for any in-flight write and permanently blocks later writes.
+// Account deletion calls this before removing durable data so an old request
+// cannot recreate rows after the purge completed.
+func (s *HistoryStore) Disable() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.disabled = true
+}
+
+func cloneDays(days []Day) []Day {
+	out := make([]Day, len(days))
+	copy(out, days)
+	return out
 }

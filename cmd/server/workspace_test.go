@@ -13,6 +13,8 @@ import (
 	"github.com/cloudwego/eino/components/embedding"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
+
+	"tomato-platform/internal/menu"
 )
 
 type stubEmbedder struct{}
@@ -42,7 +44,7 @@ func (m stubChatModel) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel
 
 func testRegistry(t *testing.T, users *userRegistry) *registry {
 	t.Helper()
-	return newRegistry(t.TempDir(), users, false, stubEmbedder{}, stubChatModel{})
+	return newRegistry(t.TempDir(), users, false, stubEmbedder{}, stubChatModel{}, nil)
 }
 
 func TestRegistry_FailClosed(t *testing.T) {
@@ -69,7 +71,7 @@ func TestRegistry_FailClosed(t *testing.T) {
 }
 
 func TestRegistry_AcceptsOnlyCanonicalPlatformUUIDs(t *testing.T) {
-	reg := newRegistry(t.TempDir(), nil, true, stubEmbedder{}, stubChatModel{})
+	reg := newRegistry(t.TempDir(), nil, true, stubEmbedder{}, stubChatModel{}, nil)
 	if _, err := reg.get(context.Background(), "c733a5d7-7b65-49ac-b6d2-872fd57a4ce6"); err != nil {
 		t.Fatalf("已认证的平台 UUID 应可建 workspace: %v", err)
 	}
@@ -94,7 +96,7 @@ func TestRegistry_PlatformRosterSurvivesRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reg := newRegistry(dataDir, nil, true, stubEmbedder{}, stubChatModel{}) // 全新进程：注册表是空的
+	reg := newRegistry(dataDir, nil, true, stubEmbedder{}, stubChatModel{}, nil) // 全新进程：注册表是空的
 	got := map[string]bool{}
 	for _, uid := range reg.allUIDs() {
 		got[uid] = true
@@ -112,7 +114,7 @@ func TestRegistry_PlatformRosterSurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mixed := newRegistry(dataDir, users, true, stubEmbedder{}, stubChatModel{})
+	mixed := newRegistry(dataDir, users, true, stubEmbedder{}, stubChatModel{}, nil)
 	got = map[string]bool{}
 	for _, uid := range mixed.allUIDs() {
 		got[uid] = true
@@ -180,7 +182,7 @@ func TestRegistry_PurgeWipesTenantAndTombstonesIt(t *testing.T) {
 	const uid = "c733a5d7-7b65-49ac-b6d2-872fd57a4ce6"
 	ctx := context.Background()
 	dataDir := t.TempDir()
-	reg := newRegistry(dataDir, nil, true, stubEmbedder{}, stubChatModel{})
+	reg := newRegistry(dataDir, nil, true, stubEmbedder{}, stubChatModel{}, nil)
 
 	ws, err := reg.get(ctx, uid)
 	if err != nil {
@@ -202,6 +204,20 @@ func TestRegistry_PurgeWipesTenantAndTombstonesIt(t *testing.T) {
 	}
 	if _, err := reg.get(ctx, uid); err == nil {
 		t.Error("已清除的租户不该被重新建出来——飞行中的请求会把数据写回去")
+	}
+	// 已经拿到旧 workspace 指针的在途请求也不能再落任何一笔；否则目录/数据库
+	// 会在清除接口返回 204 之后死灰复燃。
+	if _, err := ws.inv.Add("鸡蛋", 1, "个"); err == nil {
+		t.Error("清除前取得的库存 store 不该再接受写入")
+	}
+	if _, _, err := ws.history.SetMeal("2026-09-09", "lunch", menu.Meal{}); err == nil {
+		t.Error("清除前取得的历史 store 不该再接受写入")
+	}
+	if err := ws.profile.Set(menu.Profile{BabyName: "不应写入"}); err == nil {
+		t.Error("清除前取得的档案 store 不该再接受写入")
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("旧 workspace 写入后数据目录复活了: %v", err)
 	}
 	for _, listed := range reg.allUIDs() {
 		if listed == uid {

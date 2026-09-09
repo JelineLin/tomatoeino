@@ -113,6 +113,17 @@ func BuildAgent(ctx context.Context, embedder embedding.Embedder, cm model.ToolC
 	if err != nil {
 		return nil, err
 	}
+	return BuildAgentWithStores(ctx, embedder, cm, hs, inv, ps)
+}
+
+// BuildAgentWithStores assembles the same agent over preloaded stores. The HTTP
+// service uses it for PostgreSQL-backed platform users; examples and legacy users
+// keep using BuildAgent with local JSON files.
+func BuildAgentWithStores(ctx context.Context, embedder embedding.Embedder, cm model.ToolCallingChatModel,
+	hs *HistoryStore, inv *InventoryStore, ps *ProfileStore) (*Assembly, error) {
+	if hs == nil || inv == nil || ps == nil {
+		return nil, fmt.Errorf("Menu stores 未完整配置")
+	}
 
 	// 2. 建向量库，把历史灌进去（一次批量 embedding；空历史零 API 调用）
 	store := vectorstore.New(embedder)

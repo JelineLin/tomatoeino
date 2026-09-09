@@ -39,9 +39,11 @@ func (p Profile) IsEmpty() bool {
 
 // ProfileStore 是带锁、带落盘的档案。
 type ProfileStore struct {
-	mu   sync.Mutex
-	path string
-	p    Profile
+	mu       sync.Mutex
+	path     string
+	p        Profile
+	persist  func(Profile) error
+	disabled bool
 }
 
 // NewProfileStore 打开（或新建）档案。文件不存在不算错——空档案，建档时落盘。
@@ -74,7 +76,22 @@ func (s *ProfileStore) Get() Profile {
 func (s *ProfileStore) Set(p Profile) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.p = p
+	before := cloneProfile(s.p)
+	s.p = cloneProfile(p)
+	if err := s.save(); err != nil {
+		s.p = before
+		return err
+	}
+	return nil
+}
+
+func (s *ProfileStore) save() error {
+	if s.disabled {
+		return fmt.Errorf("用户数据已停用")
+	}
+	if s.persist != nil {
+		return s.persist(cloneProfile(s.p))
+	}
 	raw, err := json.MarshalIndent(s.p, "", "  ")
 	if err != nil {
 		return fmt.Errorf("序列化档案失败: %w", err)
@@ -101,6 +118,19 @@ func (s *ProfileStore) Set(p Profile) error {
 		return fmt.Errorf("落盘档案失败: %w", err)
 	}
 	return nil
+}
+
+// Disable serializes with writes and prevents account deletion races.
+func (s *ProfileStore) Disable() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.disabled = true
+}
+
+func cloneProfile(p Profile) Profile {
+	p.Allergies = append([]string(nil), p.Allergies...)
+	p.Dislikes = append([]string(nil), p.Dislikes...)
+	return p
 }
 
 // Update 合并式更新档案并落盘，是 update_profile 工具与 HTTP 写端点【共用的写核心】——

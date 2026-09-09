@@ -1,0 +1,8 @@
+BEGIN;
+
+DROP TABLE IF EXISTS menu.profiles;
+DROP TABLE IF EXISTS menu.inventory_items;
+DROP TABLE IF EXISTS menu.meals;
+DROP SCHEMA IF EXISTS menu;
+
+COMMIT;

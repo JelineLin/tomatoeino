@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/cloudwego/eino/components/embedding"
 	"github.com/cloudwego/eino/components/model"
@@ -53,11 +54,12 @@ type registry struct {
 	dataDir  string
 	users    *userRegistry // 合法 uid 的裁判（nil = 单用户本地模式，只认 defaultUserID）
 	platform bool          // 是否接受已由 account-server 验证的 UUID 用户
+	repo     *menu.PostgresRepository
 	embedder embedding.Embedder
 	cm       model.ToolCallingChatModel
 }
 
-func newRegistry(dataDir string, users *userRegistry, platform bool, embedder embedding.Embedder, cm model.ToolCallingChatModel) *registry {
+func newRegistry(dataDir string, users *userRegistry, platform bool, embedder embedding.Embedder, cm model.ToolCallingChatModel, repo *menu.PostgresRepository) *registry {
 	return &registry{
 		m:        map[string]*workspace{},
 		building: map[string]chan struct{}{},
@@ -67,6 +69,7 @@ func newRegistry(dataDir string, users *userRegistry, platform bool, embedder em
 		platform: platform,
 		embedder: embedder,
 		cm:       cm,
+		repo:     repo,
 	}
 }
 
@@ -124,6 +127,10 @@ func (r *registry) get(ctx context.Context, uid string) (*workspace, error) {
 
 	for {
 		r.mu.Lock()
+		if _, purged := r.purged[uid]; purged {
+			r.mu.Unlock()
+			return nil, fmt.Errorf("用户 %q 的数据已随账号删除清除", uid)
+		}
 		if ws, ok := r.m[uid]; ok {
 			r.mu.Unlock()
 			return ws, nil
@@ -145,11 +152,20 @@ func (r *registry) get(ctx context.Context, uid string) (*workspace, error) {
 
 		r.mu.Lock()
 		delete(r.building, uid)
-		if err == nil {
+		_, purged := r.purged[uid]
+		if err == nil && !purged {
 			r.m[uid] = ws
 		}
 		r.mu.Unlock()
 		close(ch) // 无论成败都放行等待者；失败时它们会重走循环、自己再试一次
+		if purged {
+			if ws != nil {
+				ws.history.Disable()
+				ws.inv.Disable()
+				ws.profile.Disable()
+			}
+			return nil, fmt.Errorf("用户 %q 在 workspace 构建期间被删除", uid)
+		}
 
 		return ws, err
 	}
@@ -161,10 +177,20 @@ func (r *registry) build(ctx context.Context, uid string) (*workspace, error) {
 	dir := filepath.Join(r.dataDir, "users", uid)
 	log.Printf("🏗️  构建用户 %s 的 workspace（%s）…", uid, dir)
 
-	asm, err := menu.BuildAgent(ctx, r.embedder, r.cm,
-		filepath.Join(dir, "history.json"),
-		filepath.Join(dir, "inventory.json"),
-		filepath.Join(dir, "profile.json"))
+	var asm *menu.Assembly
+	var err error
+	if r.repo != nil && canonicalUUID(uid) {
+		history, inventory, profile, loadErr := menu.NewPostgresStores(ctx, r.repo, uid)
+		if loadErr != nil {
+			return nil, fmt.Errorf("从 PostgreSQL 加载用户 %s 失败: %w", uid, loadErr)
+		}
+		asm, err = menu.BuildAgentWithStores(ctx, r.embedder, r.cm, history, inventory, profile)
+	} else {
+		asm, err = menu.BuildAgent(ctx, r.embedder, r.cm,
+			filepath.Join(dir, "history.json"),
+			filepath.Join(dir, "inventory.json"),
+			filepath.Join(dir, "profile.json"))
+	}
 	if err != nil {
 		return nil, fmt.Errorf("构建用户 %s 的 workspace 失败: %w", uid, err)
 	}
@@ -193,8 +219,24 @@ func (r *registry) purge(uid string) error {
 	}
 	r.mu.Lock()
 	r.purged[uid] = struct{}{}
+	ws := r.m[uid]
 	delete(r.m, uid)
 	r.mu.Unlock()
+	if ws != nil {
+		// Disable takes each store lock. A write that started before the tombstone
+		// finishes first; every later write fails. Durable deletion therefore runs
+		// after all accepted writes and cannot be undone by a stale request.
+		ws.history.Disable()
+		ws.inv.Disable()
+		ws.profile.Disable()
+	}
+	if r.repo != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := r.repo.DeleteUserData(ctx, uid); err != nil {
+			return fmt.Errorf("从 PostgreSQL 删除用户 %s 的 Menu 数据失败: %w", uid, err)
+		}
+	}
 
 	dir := filepath.Join(r.dataDir, "users", uid)
 	if err := os.RemoveAll(dir); err != nil {
@@ -240,6 +282,18 @@ func (r *registry) allUIDs() []string {
 		}
 	}
 	if r.platform {
+		if r.repo != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			ids, err := r.repo.UserIDs(ctx)
+			cancel()
+			if err != nil {
+				log.Printf("⚠️  从 PostgreSQL 扫描 Menu 用户失败: %v", err)
+			} else {
+				for _, uid := range ids {
+					known[uid] = struct{}{}
+				}
+			}
+		}
 		for _, uid := range r.platformUIDsOnDisk() {
 			known[uid] = struct{}{}
 		}

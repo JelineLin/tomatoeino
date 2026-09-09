@@ -24,6 +24,7 @@ internal/vectorstore/ 从零写的内存向量库（cosine 检索），实现 ei
 internal/menu/        备餐 agent 业务核心：领域类型 + 知识库 + 工具 + ReAct 装配
 cmd/account-server/   统一身份与客户平台入口，默认监听 :8460
 cmd/server/           HTTP 后端：SSE 流式 /api/chat + REST /api/history + /healthz
+cmd/menu-data-migrate/ 把指定旧用户的 Menu JSON 显式迁移到平台 UUID
 internal/english/     英语课程、SQLite 学习账本、进度规则、转写对齐与模型生成
 cmd/english-server/   独立 English Coach API / generate-today 命令，默认监听 :8450
 english-web/          独立 Next.js 静态前端（今日课程、朗读、历史、趋势、周报、档案）
@@ -43,6 +44,7 @@ migrations/postgres/  PostgreSQL 版本化 migration（生产环境由开发者�
 ```bash
 psql "$PLATFORM_DATABASE_URL" -f migrations/postgres/000001_account.up.sql
 psql "$PLATFORM_DATABASE_URL" -f migrations/postgres/000002_apple_credentials_and_deletion.up.sql
+psql "$PLATFORM_DATABASE_URL" -f migrations/postgres/000003_menu_business_data.up.sql
 ```
 
 当前 `account-server` 已提供：
@@ -57,17 +59,32 @@ psql "$PLATFORM_DATABASE_URL" -f migrations/postgres/000002_apple_credentials_an
 配置 `ACCOUNT_BASE_URL` 后，Menu Agent 与 English Coach 都接受平台 Access Token：业务请求
 实时调用 `GET /v1/me` 校验会话，并分别要求 `menu` / `english` 产品权限。登出、冻结或删除
 账号会立即阻断后续业务请求；原有 `users.json` / `API_TOKEN` 暂时保留为旧数据迁移通道。
-平台用户没有本地名册，`DATA_DIR/users/<uuid>/` 这份数据本身就是名册——每日简报和启动预热
-按它逐户执行，重启后当天没来过的平台用户照样收得到早简报。
+配置 `MENU_DATABASE_URL` 后，平台用户的餐次、库存和宝宝档案分别存入 `menu.meals`、
+`menu.inventory_items` 和 `menu.profiles`；每日简报与启动预热从 PostgreSQL 恢复用户名册。
+这个连接必须指向包含 `account.users` 的同一个 PostgreSQL database。未配置时仍兼容
+`DATA_DIR/users/<uuid>/`，方便本地开发和分阶段切换。
 
 删除账号会连业务数据一起清干净：`DELETE /v1/me` 先冻结账号、撤销全部会话，后台任务
 逐一撤销 Apple 授权，再按 `MENU_BASE_URL` / `ENGLISH_BASE_URL` 调各产品的
 `DELETE /internal/v1/users/<uuid>`（认 `PLATFORM_INTERNAL_TOKEN` 共享密钥，不认用户会话），
 **全部清除成功之后**才硬删账户数据——顺序反了的话，`account.users` 一没，业务数据就成了
 没人认领的孤儿。任何一步失败都整单退避重试，各产品的清除接口因此都是幂等的：
-Menu 删掉 `DATA_DIR/users/<uuid>/` 并给该租户立墓碑（飞行中的请求不许把它建回来），
+Menu 事务删除 PostgreSQL 数据（兼容清理旧目录）并给该租户立墓碑，在删除前锁住并停用
+三类 store，确保飞行中的旧请求不能把数据写回来；
 English 在一个事务里删掉九张表的记录并连录音文件一起清除。`/internal/` 只该走本机环回，
 反向代理要挡掉（见 `deploy/nginx-english.conf`）。
+
+已有 Menu JSON 必须在确认“旧目录属于哪个平台用户”后手动迁移。工具不会覆盖已有数据库
+数据，也不会删除源文件。例如把旧 `home` 数据归到某个已存在的统一账户：
+
+```bash
+go run ./cmd/menu-data-migrate \
+  --source-user home \
+  --user-id c733a5d7-7b65-49ac-b6d2-872fd57a4ce6
+```
+
+切换顺序是：手动应用 `000003` → 逐户运行迁移工具并核对 → 配置 `MENU_DATABASE_URL`
+并重启 Menu 服务。不要先启用数据库再迁移，否则旧 UUID 目录会暂时显示成空账户。
 
 平台 Refresh Token 只把 SHA-256 摘要写入 PostgreSQL，原文只在签发响应中返回。Apple
 refresh token 使用 AES-256-GCM 加密，并绑定 Apple subject 与 Client ID；账号删除任务采用

@@ -44,9 +44,11 @@ type InventoryItem struct {
 // InventoryStore 是带锁、带落盘的库存账本。
 // 用切片而不是 map：保持入库顺序，展示稳定（map 遍历顺序会抖）。
 type InventoryStore struct {
-	mu    sync.Mutex
-	path  string
-	items []InventoryItem
+	mu       sync.Mutex
+	path     string
+	items    []InventoryItem
+	persist  func([]InventoryItem) error
+	disabled bool
 	// now 是可注入的时钟，只为让新鲜度相关的测试能造出「三天前买的」这种状态。
 	// 生产路径永远是 time.Now（NewInventoryStore 里装配）。
 	now func() time.Time
@@ -142,6 +144,7 @@ func (s *InventoryStore) Add(name string, qty float64, unit string) (InventoryIt
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	before := cloneInventory(s.items)
 	for i := range s.items {
 		if s.items[i].Name == name {
 			s.items[i].Quantity += qty
@@ -150,7 +153,12 @@ func (s *InventoryStore) Add(name string, qty float64, unit string) (InventoryIt
 			}
 			// 补货刷新时间戳：又买了一份，这样东西就该按「今天买的」算。
 			s.items[i].UpdatedAt = s.stamp()
-			return s.items[i], s.save()
+			out := s.items[i]
+			if err := s.save(); err != nil {
+				s.items = before
+				return out, err
+			}
+			return out, nil
 		}
 	}
 	if unit == "" {
@@ -158,7 +166,11 @@ func (s *InventoryStore) Add(name string, qty float64, unit string) (InventoryIt
 	}
 	it := InventoryItem{Name: name, Quantity: qty, Unit: unit, UpdatedAt: s.stamp()}
 	s.items = append(s.items, it)
-	return it, s.save()
+	if err := s.save(); err != nil {
+		s.items = before
+		return it, err
+	}
+	return it, nil
 }
 
 // stamp 取当前时刻的 RFC3339 串。截断到秒——库存的时间精度到天就够了，
@@ -184,6 +196,7 @@ func (s *InventoryStore) Consume(name string, qty float64) (InventoryItem, bool,
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	before := cloneInventory(s.items)
 
 	idx := -1
 	for i := range s.items {
@@ -218,10 +231,19 @@ func (s *InventoryStore) Consume(name string, qty float64) (InventoryItem, bool,
 		// 不够扣：清零出清，不记负数。
 		out := InventoryItem{Name: it.Name, Quantity: 0, Unit: it.Unit}
 		s.items = append(s.items[:idx], s.items[idx+1:]...)
-		return out, true, s.save()
+		if err := s.save(); err != nil {
+			s.items = before
+			return out, true, err
+		}
+		return out, true, nil
 	}
 	it.Quantity -= qty
-	return *it, false, s.save()
+	out := *it
+	if err := s.save(); err != nil {
+		s.items = before
+		return out, false, err
+	}
+	return out, false, nil
 }
 
 // ConsumedItem 是一条出库结果，回给前端做提示（「西兰花用掉 1 份，还剩 0.5 份」）。
@@ -277,6 +299,7 @@ func (s *InventoryStore) Set(name string, qty float64, unit string) (InventoryIt
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	before := cloneInventory(s.items)
 	for i := range s.items {
 		if s.items[i].Name == name {
 			s.items[i].Quantity = qty
@@ -286,7 +309,12 @@ func (s *InventoryStore) Set(name string, qty float64, unit string) (InventoryIt
 			// 界面上手改份数也刷新时间戳：家长愿意去数一遍，说明他刚看过冰箱，
 			// 这个数字此刻是可信的——比几天前那次入库更值得当作「最新观测」。
 			s.items[i].UpdatedAt = s.stamp()
-			return s.items[i], s.save()
+			out := s.items[i]
+			if err := s.save(); err != nil {
+				s.items = before
+				return out, err
+			}
+			return out, nil
 		}
 	}
 	if unit == "" {
@@ -294,7 +322,11 @@ func (s *InventoryStore) Set(name string, qty float64, unit string) (InventoryIt
 	}
 	it := InventoryItem{Name: name, Quantity: qty, Unit: unit, UpdatedAt: s.stamp()}
 	s.items = append(s.items, it)
-	return it, s.save()
+	if err := s.save(); err != nil {
+		s.items = before
+		return it, err
+	}
+	return it, nil
 }
 
 // Remove 按精确名称删除整条库存（界面划删用）。不存在则报错，让调用方知道没删到。
@@ -306,10 +338,15 @@ func (s *InventoryStore) Remove(name string) error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	before := cloneInventory(s.items)
 	for i := range s.items {
 		if s.items[i].Name == name {
 			s.items = append(s.items[:i], s.items[i+1:]...)
-			return s.save()
+			if err := s.save(); err != nil {
+				s.items = before
+				return err
+			}
+			return nil
 		}
 	}
 	return fmt.Errorf("库存里没有「%s」", name)
@@ -317,6 +354,12 @@ func (s *InventoryStore) Remove(name string) error {
 
 // save 全量落盘：临时文件 + rename 原子替换。调用方必须已持有锁。
 func (s *InventoryStore) save() error {
+	if s.disabled {
+		return fmt.Errorf("用户数据已停用")
+	}
+	if s.persist != nil {
+		return s.persist(cloneInventory(s.items))
+	}
 	raw, err := json.MarshalIndent(s.items, "", "  ")
 	if err != nil {
 		return fmt.Errorf("序列化库存失败: %w", err)
@@ -343,6 +386,19 @@ func (s *InventoryStore) save() error {
 		return fmt.Errorf("落盘库存失败: %w", err)
 	}
 	return nil
+}
+
+// Disable serializes with writes and prevents account deletion races.
+func (s *InventoryStore) Disable() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.disabled = true
+}
+
+func cloneInventory(items []InventoryItem) []InventoryItem {
+	out := make([]InventoryItem, len(items))
+	copy(out, items)
+	return out
 }
 
 // fmtQty 把份数渲染成人话：整数不带小数点（2份），小数保留原样（0.5份）。

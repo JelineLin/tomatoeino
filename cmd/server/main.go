@@ -39,13 +39,15 @@ import (
 	"tomato-platform/internal/llm"
 	"tomato-platform/internal/menu"
 	"tomato-platform/internal/platformauth"
+	"tomato-platform/internal/platformdb"
 	"tomato-platform/internal/platformpurge"
 )
 
 // server 持有 workspace 注册表——每个用户一整套 agent/账本/会话/简报，
 // 按 userID 懒加载（见 workspace.go）。handler 里一律先 s.ws(r) 取当前用户的世界。
 type server struct {
-	reg *registry
+	reg  *registry
+	repo *menu.PostgresRepository
 	// vision 是进程级共享的视觉模型（图片解析用，图→文字）。它是无状态抽取、跨用户共享，
 	// 不进 per-user workspace。未配置/构建失败时为 nil，图片解析端点会优雅报 503。
 	vision model.BaseChatModel
@@ -75,6 +77,27 @@ func main() {
 		log.Printf("鉴权就绪：统一账户=%t，旧用户=%d，旧钥匙=%d", accountAuth != nil, legacyUsers, legacyTokens)
 	}
 
+	// 平台 UUID 用户可选择 PostgreSQL 作为权威数据源；旧 users.json 用户在完成
+	// 映射前继续读本地文件。进程只检查 schema，绝不自动执行 migration。
+	var menuRepo *menu.PostgresRepository
+	if databaseURL := strings.TrimSpace(os.Getenv("MENU_DATABASE_URL")); databaseURL != "" {
+		pool, err := platformdb.Open(ctx0, databaseURL)
+		if err != nil {
+			log.Fatalf("连接 Menu PostgreSQL 失败: %v", err)
+		}
+		defer pool.Close()
+		menuRepo = menu.NewPostgresRepository(pool)
+		readyCtx, cancel := context.WithTimeout(ctx0, 3*time.Second)
+		err = menuRepo.Ready(readyCtx)
+		cancel()
+		if err != nil {
+			log.Fatalf("Menu PostgreSQL 未就绪: %v", err)
+		}
+		log.Printf("Menu PostgreSQL 已启用：平台用户不再写本地 JSON")
+	} else if accountAuth != nil {
+		log.Printf("⚠️  未配置 MENU_DATABASE_URL，平台用户仍暂存本地 JSON")
+	}
+
 	// 2. 进程级共享的重资源：embedder + chat client 只建一份，注入给所有 workspace。
 	embedder, err := llm.NewEmbedder(ctx0)
 	if err != nil {
@@ -94,8 +117,8 @@ func main() {
 
 	// 3. workspace 注册表：数据在 DATA_DIR/users/<uid>/ 下，按需懒构建。
 	//    进程启动不再等全量 embed——毫秒级起服，谁来了建谁的。
-	reg := newRegistry(envOr("DATA_DIR", "data"), users, accountAuth != nil, embedder, cm)
-	srv := &server{reg: reg, vision: vision, chat: cm}
+	reg := newRegistry(envOr("DATA_DIR", "data"), users, accountAuth != nil, embedder, cm, menuRepo)
+	srv := &server{reg: reg, repo: menuRepo, vision: vision, chat: cm}
 
 	// 会话清扫：全局 ticker 遍历所有已建 workspace。goroutine 随进程退出。
 	go func() {
@@ -123,6 +146,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", srv.handleHealth)
+	mux.HandleFunc("/readyz", srv.handleReady)
 	mux.HandleFunc("/api/history", srv.handleHistory)
 	mux.HandleFunc("/api/history/feedback", srv.handleFeedback)
 	mux.HandleFunc("/api/history/apply", srv.handleApplyMeal)
@@ -206,6 +230,19 @@ func main() {
 func (s *server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	_, _ = io.WriteString(w, "ok")
+}
+
+func (s *server) handleReady(w http.ResponseWriter, r *http.Request) {
+	if s.repo != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		if err := s.repo.Ready(ctx); err != nil {
+			http.Error(w, "menu database unavailable", http.StatusServiceUnavailable)
+			return
+		}
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = io.WriteString(w, "ready")
 }
 
 // ws 取当前请求用户的 workspace（懒构建；首次要全量 embed，几秒到十几秒）。
