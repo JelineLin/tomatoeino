@@ -31,13 +31,17 @@ type Device struct {
 }
 
 type AppleLoginParams struct {
-	ChallengeID      string
-	ProductCode      string
-	Identity         AppleIdentity
-	DisplayName      string
-	Device           Device
-	RefreshHash      [sha256.Size]byte
-	RefreshExpiresAt time.Time
+	ChallengeID            string
+	ProductCode            string
+	Identity               AppleIdentity
+	AppleClientID          string
+	AppleRefreshHash       [sha256.Size]byte
+	AppleRefreshCiphertext []byte
+	AppleRefreshNonce      []byte
+	DisplayName            string
+	Device                 Device
+	RefreshHash            [sha256.Size]byte
+	RefreshExpiresAt       time.Time
 }
 
 type UserSession struct {
@@ -51,6 +55,7 @@ type AccountStore interface {
 	RotateSession(context.Context, [sha256.Size]byte, [sha256.Size]byte, time.Time) (UserSession, error)
 	UserForSession(context.Context, string, string) (User, error)
 	RevokeSession(context.Context, string, string) error
+	RequestDeletion(context.Context, string, string) (DeletionJob, error)
 }
 
 type PostgresStore struct {
@@ -59,6 +64,21 @@ type PostgresStore struct {
 
 func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore {
 	return &PostgresStore{pool: pool}
+}
+
+func (s *PostgresStore) Ready(ctx context.Context) error {
+	var ready bool
+	err := s.pool.QueryRow(ctx, `
+		SELECT to_regclass('account.users') IS NOT NULL
+		   AND to_regclass('account.apple_credentials') IS NOT NULL
+		   AND to_regclass('account.account_deletion_jobs') IS NOT NULL`).Scan(&ready)
+	if err != nil {
+		return fmt.Errorf("检查账户数据库结构失败: %w", err)
+	}
+	if !ready {
+		return fmt.Errorf("账户数据库 migration 尚未完成")
+	}
+	return nil
 }
 
 func (s *PostgresStore) CreateChallenge(ctx context.Context, productCode string, nonceHash [sha256.Size]byte, expiresAt time.Time) (string, error) {
@@ -101,12 +121,13 @@ func (s *PostgresStore) LoginApple(ctx context.Context, p AppleLoginParams) (Use
 
 	user := User{}
 	var status string
+	var identityID string
 	err = tx.QueryRow(ctx, `
-		SELECT u.id::text, u.status, u.display_name
+		SELECT u.id::text, u.status, u.display_name, i.id::text
 		FROM account.identities i
 		JOIN account.users u ON u.id = i.user_id
 		WHERE i.provider = 'apple' AND i.provider_subject = $1
-		FOR UPDATE OF u`, p.Identity.Subject).Scan(&user.ID, &status, &user.DisplayName)
+		FOR UPDATE OF u`, p.Identity.Subject).Scan(&user.ID, &status, &user.DisplayName, &identityID)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		err = tx.QueryRow(ctx, `
@@ -119,11 +140,13 @@ func (s *PostgresStore) LoginApple(ctx context.Context, p AppleLoginParams) (Use
 		if _, err = tx.Exec(ctx, `INSERT INTO account.parties(user_id) VALUES ($1)`, user.ID); err != nil {
 			return UserSession{}, fmt.Errorf("创建客户主体失败: %w", err)
 		}
-		if _, err = tx.Exec(ctx, `
+		err = tx.QueryRow(ctx, `
 			INSERT INTO account.identities(
 				user_id, provider, provider_subject, email, email_verified, last_login_at
-			) VALUES ($1, 'apple', $2, NULLIF($3, ''), $4, now())`,
-			user.ID, p.Identity.Subject, p.Identity.Email, p.Identity.EmailVerified); err != nil {
+			) VALUES ($1, 'apple', $2, NULLIF($3, ''), $4, now())
+			RETURNING id::text`, user.ID, p.Identity.Subject, p.Identity.Email, p.Identity.EmailVerified).
+			Scan(&identityID)
+		if err != nil {
 			return UserSession{}, fmt.Errorf("绑定 Apple 身份失败: %w", err)
 		}
 	case err != nil:
@@ -140,6 +163,18 @@ func (s *PostgresStore) LoginApple(ctx context.Context, p AppleLoginParams) (Use
 			p.Identity.Subject, p.Identity.Email, p.Identity.EmailVerified); err != nil {
 			return UserSession{}, fmt.Errorf("更新 Apple 身份失败: %w", err)
 		}
+	}
+	if _, err = tx.Exec(ctx, `
+		INSERT INTO account.apple_credentials(
+			identity_id, client_id, refresh_token_hash,
+			refresh_token_ciphertext, refresh_token_nonce
+		) VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (identity_id, client_id, refresh_token_hash) DO UPDATE SET
+			refresh_token_ciphertext = EXCLUDED.refresh_token_ciphertext,
+			refresh_token_nonce = EXCLUDED.refresh_token_nonce,
+			updated_at = now()`, identityID, p.AppleClientID, p.AppleRefreshHash[:],
+		p.AppleRefreshCiphertext, p.AppleRefreshNonce); err != nil {
+		return UserSession{}, fmt.Errorf("保存 Apple refresh token 失败: %w", err)
 	}
 
 	if _, err = tx.Exec(ctx, `

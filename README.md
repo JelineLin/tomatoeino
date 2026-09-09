@@ -40,19 +40,25 @@ migrations/postgres/  PostgreSQL 版本化 migration（生产环境由开发者�
 
 ```bash
 psql "$PLATFORM_DATABASE_URL" -f migrations/postgres/000001_account.up.sql
+psql "$PLATFORM_DATABASE_URL" -f migrations/postgres/000002_apple_credentials_and_deletion.up.sql
 ```
 
 当前 `account-server` 已提供：
 
 - `POST /v1/auth/apple/challenges`：签发一次性 nonce，防止 Apple 凭证重放；
-- `POST /v1/auth/apple`：校验 Apple 签名、issuer、audience、有效期和 nonce，并创建统一账户；
+- `POST /v1/auth/apple`：校验身份令牌和 authorization code、加密保存 Apple refresh token，并创建统一账户；
 - `POST /v1/auth/refresh`：轮换一次性 Refresh Token；
 - `GET /v1/me` 与 `POST /v1/auth/logout`：查询统一身份和撤销设备会话；
+- `DELETE /v1/me`：立即冻结账号和全部会话，后台逐一撤销 Apple 授权后硬删除账户数据；
 - `/healthz` 与 `/readyz`：进程和 PostgreSQL 就绪探针。
 
-Refresh Token 只把 SHA-256 摘要写入 PostgreSQL，原文只在签发响应中返回。Apple
-authorization code 换取/安全保存 Apple refresh token、账号删除时向 Apple 撤销授权，
-以及旧 `API_TOKEN` 用户映射仍属于后续阶段，当前版本还不能视为 App Store 认证闭环。
+平台 Refresh Token 只把 SHA-256 摘要写入 PostgreSQL，原文只在签发响应中返回。Apple
+refresh token 使用 AES-256-GCM 加密，并绑定 Apple subject 与 Client ID；账号删除任务采用
+数据库租约和退避重试，Apple 撤销成功后才删除账户域数据。Menu Agent / English Coach
+业务数据删除、旧 `API_TOKEN` 用户映射和客户端登录界面仍属于后续阶段，因此当前版本还不能上架。
+
+若两个 App 要自然识别为同一 Apple 用户，需要在 Apple Developer 后台将两个 App ID 配置到
+同一个 Sign in with Apple primary app / app group；不能用邮箱（包括私密转发邮箱）猜测合并账户。
 
 ## 跑起来
 
@@ -73,7 +79,7 @@ go run ./cmd/server          # 默认监听 :8080，可用 PORT 覆盖
 统一账号平台基础进程：
 
 ```bash
-go run ./cmd/account-server  # 默认 :8460，需要 PLATFORM_DATABASE_URL、ACCOUNT_TOKEN_SECRET、APPLE_CLIENT_IDS
+go run ./cmd/account-server  # 默认 :8460；所需变量见 .env.example 的 Tomato Platform 区域
 ```
 
 冒烟自测：

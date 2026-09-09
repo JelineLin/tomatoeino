@@ -21,6 +21,8 @@ type AppleIdentityVerifier interface {
 type Service struct {
 	store         AccountStore
 	appleVerifier AppleIdentityVerifier
+	appleTokens   AppleTokenService
+	cipher        *TokenCipher
 	tokens        *TokenManager
 	now           func() time.Time
 }
@@ -32,11 +34,13 @@ type Challenge struct {
 }
 
 type LoginInput struct {
-	IdentityToken string `json:"identity_token"`
-	ChallengeID   string `json:"challenge_id"`
-	ProductCode   string `json:"product_code"`
-	DisplayName   string `json:"display_name"`
-	Device        Device `json:"device"`
+	IdentityToken     string `json:"identity_token"`
+	AuthorizationCode string `json:"authorization_code"`
+	RedirectURI       string `json:"redirect_uri"`
+	ChallengeID       string `json:"challenge_id"`
+	ProductCode       string `json:"product_code"`
+	DisplayName       string `json:"display_name"`
+	Device            Device `json:"device"`
 }
 
 type TokenSet struct {
@@ -48,8 +52,11 @@ type TokenSet struct {
 	User             User      `json:"user"`
 }
 
-func NewService(store AccountStore, appleVerifier AppleIdentityVerifier, tokens *TokenManager) *Service {
-	return &Service{store: store, appleVerifier: appleVerifier, tokens: tokens, now: time.Now}
+func NewService(store AccountStore, appleVerifier AppleIdentityVerifier, appleTokens AppleTokenService, cipher *TokenCipher, tokens *TokenManager) *Service {
+	return &Service{
+		store: store, appleVerifier: appleVerifier, appleTokens: appleTokens,
+		cipher: cipher, tokens: tokens, now: time.Now,
+	}
 }
 
 func (s *Service) NewAppleChallenge(ctx context.Context, productCode string) (Challenge, error) {
@@ -71,13 +78,16 @@ func (s *Service) NewAppleChallenge(ctx context.Context, productCode string) (Ch
 
 func (s *Service) LoginApple(ctx context.Context, in LoginInput) (TokenSet, error) {
 	in.IdentityToken = strings.TrimSpace(in.IdentityToken)
+	in.AuthorizationCode = strings.TrimSpace(in.AuthorizationCode)
+	in.RedirectURI = strings.TrimSpace(in.RedirectURI)
 	in.ChallengeID = strings.TrimSpace(in.ChallengeID)
 	in.ProductCode = strings.TrimSpace(in.ProductCode)
 	in.Device.ID = strings.TrimSpace(in.Device.ID)
 	in.Device.Name = cleanDisplayText(in.Device.Name, 100)
 	in.Device.Platform = cleanDisplayText(in.Device.Platform, 40)
 	in.DisplayName = cleanDisplayText(in.DisplayName, 100)
-	if in.IdentityToken == "" || in.ChallengeID == "" || !validProduct(in.ProductCode) || in.Device.ID == "" {
+	if in.IdentityToken == "" || in.AuthorizationCode == "" || in.ChallengeID == "" ||
+		!validProduct(in.ProductCode) || in.Device.ID == "" {
 		return TokenSet{}, fmt.Errorf("%w: 登录参数不完整", ErrInvalidInput)
 	}
 	if utf8.RuneCountInString(in.Device.ID) > 200 {
@@ -87,19 +97,40 @@ func (s *Service) LoginApple(ctx context.Context, in LoginInput) (TokenSet, erro
 	if err != nil {
 		return TokenSet{}, err
 	}
+	appleTokens, err := s.appleTokens.ExchangeCode(ctx, identity.ClientID, in.AuthorizationCode, in.RedirectURI)
+	if err != nil {
+		return TokenSet{}, err
+	}
+	exchangedIdentity, err := s.appleVerifier.Verify(ctx, appleTokens.IdentityToken)
+	if err != nil {
+		return TokenSet{}, err
+	}
+	if exchangedIdentity.Subject != identity.Subject || exchangedIdentity.ClientID != identity.ClientID ||
+		exchangedIdentity.Nonce != identity.Nonce {
+		return TokenSet{}, ErrInvalidAppleAuthorization
+	}
+	credentialAAD := appleCredentialAAD(identity.Subject, identity.ClientID)
+	appleCiphertext, appleNonce, err := s.cipher.SealFor(credentialAAD, appleTokens.RefreshToken)
+	if err != nil {
+		return TokenSet{}, err
+	}
 	refreshToken, refreshHash, err := NewOpaqueToken()
 	if err != nil {
 		return TokenSet{}, err
 	}
 	refreshExpiresAt := RefreshTokenExpiresAt(s.now())
 	session, err := s.store.LoginApple(ctx, AppleLoginParams{
-		ChallengeID:      in.ChallengeID,
-		ProductCode:      in.ProductCode,
-		Identity:         identity,
-		DisplayName:      in.DisplayName,
-		Device:           in.Device,
-		RefreshHash:      refreshHash,
-		RefreshExpiresAt: refreshExpiresAt,
+		ChallengeID:            in.ChallengeID,
+		ProductCode:            in.ProductCode,
+		Identity:               identity,
+		AppleClientID:          identity.ClientID,
+		AppleRefreshHash:       HashOpaqueToken(appleTokens.RefreshToken),
+		AppleRefreshCiphertext: appleCiphertext,
+		AppleRefreshNonce:      appleNonce,
+		DisplayName:            in.DisplayName,
+		Device:                 in.Device,
+		RefreshHash:            refreshHash,
+		RefreshExpiresAt:       refreshExpiresAt,
 	})
 	if err != nil {
 		return TokenSet{}, err
@@ -144,6 +175,14 @@ func (s *Service) Logout(ctx context.Context, rawAccessToken string) error {
 	return s.store.RevokeSession(ctx, session.User.ID, session.SessionID)
 }
 
+func (s *Service) RequestDeletion(ctx context.Context, rawAccessToken string) (DeletionJob, error) {
+	claims, err := s.tokens.VerifyAccessToken(rawAccessToken)
+	if err != nil {
+		return DeletionJob{}, ErrInvalidSession
+	}
+	return s.store.RequestDeletion(ctx, claims.Subject, claims.SessionID)
+}
+
 func (s *Service) issue(session UserSession, refreshToken string, refreshExpiresAt time.Time) (TokenSet, error) {
 	accessToken, accessExpiresAt, err := s.tokens.IssueAccessToken(session.User.ID, session.SessionID)
 	if err != nil {
@@ -162,7 +201,7 @@ func (s *Service) issue(session UserSession, refreshToken string, refreshExpires
 func IsAuthenticationError(err error) bool {
 	return errors.Is(err, ErrInvalidChallenge) || errors.Is(err, ErrInvalidSession) ||
 		errors.Is(err, ErrAccountUnavailable) || errors.Is(err, ErrProductUnavailable) ||
-		errors.Is(err, ErrInvalidAppleIdentity)
+		errors.Is(err, ErrInvalidAppleIdentity) || errors.Is(err, ErrInvalidAppleAuthorization)
 }
 
 func validProduct(code string) bool {

@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -26,8 +27,13 @@ type databasePinger interface {
 	Ping(context.Context) error
 }
 
+type schemaChecker interface {
+	Ready(context.Context) error
+}
+
 type server struct {
 	db      databasePinger
+	schema  schemaChecker
 	account *account.Service
 }
 
@@ -50,6 +56,24 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	dataCipher, err := account.NewTokenCipher(os.Getenv("ACCOUNT_DATA_KEY"))
+	if err != nil {
+		return err
+	}
+	privateKeyPath := strings.TrimSpace(os.Getenv("APPLE_PRIVATE_KEY_PATH"))
+	if privateKeyPath == "" {
+		return errors.New("APPLE_PRIVATE_KEY_PATH 未设置")
+	}
+	privateKeyPEM, err := os.ReadFile(privateKeyPath)
+	if err != nil {
+		return fmt.Errorf("读取 Apple 私钥失败: %w", err)
+	}
+	appleTokens, err := account.NewAppleOAuthClient(
+		os.Getenv("APPLE_TEAM_ID"), os.Getenv("APPLE_KEY_ID"), privateKeyPEM,
+	)
+	if err != nil {
+		return err
+	}
 
 	ctx := context.Background()
 	pool, err := platformdb.Open(ctx, os.Getenv("PLATFORM_DATABASE_URL"))
@@ -58,8 +82,10 @@ func run() error {
 	}
 	defer pool.Close()
 
-	accountService := account.NewService(account.NewPostgresStore(pool), appleVerifier, tokens)
-	srv := &server{db: pool, account: accountService}
+	accountStore := account.NewPostgresStore(pool)
+	accountService := account.NewService(accountStore, appleVerifier, appleTokens, dataCipher, tokens)
+	deletionWorker := account.NewDeletionWorker(accountStore, appleTokens, dataCipher)
+	srv := &server{db: pool, schema: accountStore, account: accountService}
 	httpServer := &http.Server{
 		Addr:              ":" + envOr("ACCOUNT_PORT", "8460"),
 		Handler:           srv.routes(),
@@ -72,6 +98,7 @@ func run() error {
 
 	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	go deletionWorker.Run(sigCtx)
 	serveErr := make(chan error, 1)
 	go func() {
 		log.Printf("👤 Account Platform 启动于 %s", httpServer.Addr)
@@ -120,6 +147,10 @@ func (s *server) handleReady(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	if err := s.db.Ping(ctx); err != nil {
 		http.Error(w, "database unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if err := s.schema.Ready(ctx); err != nil {
+		http.Error(w, "database schema unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")

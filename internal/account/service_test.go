@@ -16,6 +16,8 @@ type fakeAccountStore struct {
 	newRefreshHash   [sha256.Size]byte
 	revokedUser      string
 	revokedSession   string
+	deletedUser      string
+	deletionSession  string
 }
 
 func (f *fakeAccountStore) CreateChallenge(_ context.Context, product string, hash [sha256.Size]byte, _ time.Time) (string, error) {
@@ -45,14 +47,41 @@ func (f *fakeAccountStore) RevokeSession(_ context.Context, userID, sessionID st
 	return nil
 }
 
+func (f *fakeAccountStore) RequestDeletion(_ context.Context, userID, sessionID string) (DeletionJob, error) {
+	f.deletedUser, f.deletionSession = userID, sessionID
+	return DeletionJob{ID: "delete-1", Status: "pending"}, nil
+}
+
 type fakeAppleVerifier struct {
 	identity AppleIdentity
 	err      error
 }
 
+type sequenceAppleVerifier struct {
+	identities []AppleIdentity
+	index      int
+}
+
+func (f *sequenceAppleVerifier) Verify(context.Context, string) (AppleIdentity, error) {
+	identity := f.identities[f.index]
+	f.index++
+	return identity, nil
+}
+
 func (f fakeAppleVerifier) Verify(context.Context, string) (AppleIdentity, error) {
 	return f.identity, f.err
 }
+
+type fakeAppleTokenService struct {
+	tokens AppleTokens
+	err    error
+}
+
+func (f fakeAppleTokenService) ExchangeCode(context.Context, string, string, string) (AppleTokens, error) {
+	return f.tokens, f.err
+}
+
+func (fakeAppleTokenService) Revoke(context.Context, string, string) error { return nil }
 
 func newTestService(t *testing.T, store AccountStore, verifier AppleIdentityVerifier) (*Service, *TokenManager) {
 	t.Helper()
@@ -62,7 +91,14 @@ func newTestService(t *testing.T, store AccountStore, verifier AppleIdentityVeri
 	}
 	now := time.Date(2026, 9, 8, 10, 0, 0, 0, time.UTC)
 	tokens.now = func() time.Time { return now }
-	service := NewService(store, verifier, tokens)
+	cipher, err := NewTokenCipher("MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	appleTokens := fakeAppleTokenService{tokens: AppleTokens{
+		RefreshToken: "apple-refresh", IdentityToken: "exchanged-identity-token",
+	}}
+	service := NewService(store, verifier, appleTokens, cipher, tokens)
 	service.now = func() time.Time { return now }
 	return service, tokens
 }
@@ -70,7 +106,8 @@ func newTestService(t *testing.T, store AccountStore, verifier AppleIdentityVeri
 func TestServiceChallengeAndLogin(t *testing.T) {
 	store := &fakeAccountStore{}
 	service, tokens := newTestService(t, store, fakeAppleVerifier{identity: AppleIdentity{
-		Subject: "apple-user", Email: "user@example.com", EmailVerified: true, Nonce: "nonce-from-token",
+		Subject: "apple-user", ClientID: "com.example.menu", Email: "user@example.com",
+		EmailVerified: true, Nonce: "nonce-from-token",
 	}})
 	challenge, err := service.NewAppleChallenge(context.Background(), "menu")
 	if err != nil {
@@ -82,7 +119,8 @@ func TestServiceChallengeAndLogin(t *testing.T) {
 	}
 
 	set, err := service.LoginApple(context.Background(), LoginInput{
-		IdentityToken: "apple-token", ChallengeID: challenge.ID, ProductCode: "menu",
+		IdentityToken: "apple-token", AuthorizationCode: "apple-code",
+		ChallengeID: challenge.ID, ProductCode: "menu",
 		DisplayName: " Parent\n", Device: Device{ID: "phone-1", Name: "iPhone", Platform: "ios"},
 	})
 	if err != nil {
@@ -92,12 +130,41 @@ func TestServiceChallengeAndLogin(t *testing.T) {
 		t.Fatalf("token set = %+v", set)
 	}
 	if store.loginParams.Identity.Subject != "apple-user" || store.loginParams.DisplayName != "Parent" ||
-		store.loginParams.RefreshHash != HashOpaqueToken(set.RefreshToken) {
+		store.loginParams.RefreshHash != HashOpaqueToken(set.RefreshToken) ||
+		store.loginParams.AppleClientID != "com.example.menu" ||
+		store.loginParams.AppleRefreshHash != HashOpaqueToken("apple-refresh") ||
+		len(store.loginParams.AppleRefreshCiphertext) == 0 {
 		t.Fatalf("login params = %+v", store.loginParams)
+	}
+	decrypted, err := service.cipher.OpenFor(
+		appleCredentialAAD("apple-user", "com.example.menu"),
+		store.loginParams.AppleRefreshCiphertext, store.loginParams.AppleRefreshNonce,
+	)
+	if err != nil || decrypted != "apple-refresh" {
+		t.Fatalf("stored Apple credential = %q, err=%v", decrypted, err)
 	}
 	claims, err := tokens.VerifyAccessToken(set.AccessToken)
 	if err != nil || claims.Subject != "user-1" || claims.SessionID != "session-1" {
 		t.Fatalf("access claims = %+v, err = %v", claims, err)
+	}
+}
+
+func TestServiceRejectsMismatchedExchangedIdentity(t *testing.T) {
+	store := &fakeAccountStore{}
+	verifier := &sequenceAppleVerifier{identities: []AppleIdentity{
+		{Subject: "apple-user-1", ClientID: "com.example.menu", Nonce: "nonce"},
+		{Subject: "apple-user-2", ClientID: "com.example.menu", Nonce: "nonce"},
+	}}
+	service, _ := newTestService(t, store, verifier)
+	_, err := service.LoginApple(context.Background(), LoginInput{
+		IdentityToken: "first", AuthorizationCode: "code", ChallengeID: "challenge",
+		ProductCode: "menu", Device: Device{ID: "phone"},
+	})
+	if !errors.Is(err, ErrInvalidAppleAuthorization) {
+		t.Fatalf("error=%v, want ErrInvalidAppleAuthorization", err)
+	}
+	if store.loginParams.ChallengeID != "" {
+		t.Fatal("mismatched Apple credentials must not reach database login")
 	}
 }
 
@@ -125,6 +192,10 @@ func TestServiceRefreshAuthenticateAndLogout(t *testing.T) {
 	if store.revokedUser != "user-1" || store.revokedSession != "session-1" {
 		t.Fatalf("revoked = (%s, %s)", store.revokedUser, store.revokedSession)
 	}
+	job, err := service.RequestDeletion(context.Background(), access)
+	if err != nil || job.ID != "delete-1" || store.deletedUser != "user-1" || store.deletionSession != "session-1" {
+		t.Fatalf("deletion = %+v, deletedUser=%s, session=%s, err=%v", job, store.deletedUser, store.deletionSession, err)
+	}
 }
 
 func TestServiceRejectsInvalidInputAndAppleToken(t *testing.T) {
@@ -133,7 +204,8 @@ func TestServiceRejectsInvalidInputAndAppleToken(t *testing.T) {
 		t.Fatalf("challenge error = %v", err)
 	}
 	_, err := service.LoginApple(context.Background(), LoginInput{
-		IdentityToken: "bad", ChallengeID: "challenge", ProductCode: "menu", Device: Device{ID: "phone"},
+		IdentityToken: "bad", AuthorizationCode: "code", ChallengeID: "challenge",
+		ProductCode: "menu", Device: Device{ID: "phone"},
 	})
 	if !errors.Is(err, ErrInvalidAppleIdentity) {
 		t.Fatalf("login error = %v", err)

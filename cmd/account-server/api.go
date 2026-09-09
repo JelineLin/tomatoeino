@@ -76,17 +76,24 @@ func (s *server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleMe(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		methodNotAllowed(w, http.MethodGet)
-		return
+	switch r.Method {
+	case http.MethodGet:
+		session, err := s.account.Authenticate(r.Context(), bearerToken(r))
+		if err != nil {
+			s.handleAccountError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, session.User)
+	case http.MethodDelete:
+		job, err := s.account.RequestDeletion(r.Context(), bearerToken(r))
+		if err != nil {
+			s.handleAccountError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusAccepted, job)
+	default:
+		methodNotAllowed(w, http.MethodGet+", "+http.MethodDelete)
 	}
-	session, err := s.account.Authenticate(r.Context(), bearerToken(r))
-	if err != nil {
-		s.handleAccountError(w, err)
-		return
-	}
-	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusOK, session.User)
 }
 
 func (s *server) handleLogout(w http.ResponseWriter, r *http.Request) {

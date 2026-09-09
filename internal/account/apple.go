@@ -30,6 +30,7 @@ var (
 
 type AppleIdentity struct {
 	Subject       string
+	ClientID      string
 	Email         string
 	EmailVerified bool
 	Nonce         string
@@ -113,12 +114,28 @@ func (v *AppleVerifier) Verify(ctx context.Context, rawToken string) (AppleIdent
 		strings.TrimSpace(claims.Nonce) == "" {
 		return AppleIdentity{}, ErrInvalidAppleIdentity
 	}
+	clientID := matchingAudience(claims.Audience, v.audiences)
+	if clientID == "" {
+		return AppleIdentity{}, ErrInvalidAppleIdentity
+	}
 	return AppleIdentity{
 		Subject:       claims.Subject,
+		ClientID:      clientID,
 		Email:         strings.TrimSpace(claims.Email),
 		EmailVerified: bool(claims.EmailVerified),
 		Nonce:         claims.Nonce,
 	}, nil
+}
+
+func matchingAudience(actual jwt.ClaimStrings, expected []string) string {
+	for _, candidate := range actual {
+		for _, allowed := range expected {
+			if candidate == allowed {
+				return candidate
+			}
+		}
+	}
+	return ""
 }
 
 func (v *AppleVerifier) key(ctx context.Context, kid string) (*rsa.PublicKey, error) {

@@ -60,7 +60,7 @@ func TestAppleVerifier(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if identity.Subject != "apple-user-1" || identity.Nonce != "login-nonce" ||
+		if identity.Subject != "apple-user-1" || identity.ClientID != "com.example.menu" || identity.Nonce != "login-nonce" ||
 			identity.Email != "parent@example.com" || !identity.EmailVerified {
 			t.Fatalf("identity = %+v", identity)
 		}

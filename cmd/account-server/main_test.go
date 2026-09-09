@@ -12,8 +12,12 @@ type fakePinger struct{ err error }
 
 func (f fakePinger) Ping(context.Context) error { return f.err }
 
+type fakeSchemaChecker struct{ err error }
+
+func (f fakeSchemaChecker) Ready(context.Context) error { return f.err }
+
 func TestHealth(t *testing.T) {
-	srv := &server{db: fakePinger{}}
+	srv := &server{db: fakePinger{}, schema: fakeSchemaChecker{}}
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	rec := httptest.NewRecorder()
 	srv.routes().ServeHTTP(rec, req)
@@ -24,16 +28,18 @@ func TestHealth(t *testing.T) {
 
 func TestReady(t *testing.T) {
 	tests := []struct {
-		name string
-		err  error
-		want int
+		name      string
+		dbErr     error
+		schemaErr error
+		want      int
 	}{
 		{name: "database available", want: http.StatusOK},
-		{name: "database unavailable", err: errors.New("down"), want: http.StatusServiceUnavailable},
+		{name: "database unavailable", dbErr: errors.New("down"), want: http.StatusServiceUnavailable},
+		{name: "schema unavailable", schemaErr: errors.New("migration missing"), want: http.StatusServiceUnavailable},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			srv := &server{db: fakePinger{err: tt.err}}
+			srv := &server{db: fakePinger{err: tt.dbErr}, schema: fakeSchemaChecker{err: tt.schemaErr}}
 			req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
 			rec := httptest.NewRecorder()
 			srv.routes().ServeHTTP(rec, req)
