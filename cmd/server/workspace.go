@@ -18,12 +18,14 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
 	"sync"
 
 	"github.com/cloudwego/eino/components/embedding"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/flow/agent/react"
+	"github.com/google/uuid"
 
 	"tomato-platform/internal/menu"
 	"tomato-platform/internal/vectorstore"
@@ -48,16 +50,18 @@ type registry struct {
 
 	dataDir  string
 	users    *userRegistry // 合法 uid 的裁判（nil = 单用户本地模式，只认 defaultUserID）
+	platform bool          // 是否接受已由 account-server 验证的 UUID 用户
 	embedder embedding.Embedder
 	cm       model.ToolCallingChatModel
 }
 
-func newRegistry(dataDir string, users *userRegistry, embedder embedding.Embedder, cm model.ToolCallingChatModel) *registry {
+func newRegistry(dataDir string, users *userRegistry, platform bool, embedder embedding.Embedder, cm model.ToolCallingChatModel) *registry {
 	return &registry{
 		m:        map[string]*workspace{},
 		building: map[string]chan struct{}{},
 		dataDir:  dataDir,
 		users:    users,
+		platform: platform,
 		embedder: embedder,
 		cm:       cm,
 	}
@@ -70,16 +74,32 @@ func (r *registry) legalUID(uid string) error {
 	if uid == "" {
 		return fmt.Errorf("拒绝空 userID——请求没有经过鉴权中间件？")
 	}
+	if r.users != nil {
+		if _, ok := r.users.names[uid]; ok {
+			return nil
+		}
+	}
+	if r.platform {
+		if canonicalUUID(uid) {
+			return nil
+		}
+		return fmt.Errorf("统一账户 userID %q 不是规范 UUID", uid)
+	}
 	if r.users == nil {
 		if uid != defaultUserID {
 			return fmt.Errorf("单用户本地模式只认 %q，拒绝 %q", defaultUserID, uid)
 		}
 		return nil
 	}
-	if _, ok := r.users.names[uid]; !ok {
-		return fmt.Errorf("未注册的用户 %q——users.json 里没有它", uid)
-	}
-	return nil
+	return fmt.Errorf("未注册的用户 %q——users.json 里没有它", uid)
+}
+
+// canonicalUUID 是平台租户 ID 的唯一尺子：必须是 uuid 库能解析、且原样等于
+// 规范小写形式的字符串。大写变体、带花括号的变体、路径片段都会被挡在外面——
+// uid 会直接拼进 dataDir/users/<uid>/，这道尺子就是目录穿越的闸门。
+func canonicalUUID(s string) bool {
+	parsed, err := uuid.Parse(s)
+	return err == nil && parsed.String() == s
 }
 
 // get 取（或懒构建）用户的 workspace。
@@ -164,13 +184,57 @@ func (r *registry) forEach(f func(uid string, ws *workspace)) {
 }
 
 // allUIDs 列出应该存在的全部用户（不管建没建）——简报调度按它逐户生成。
+//
+// 统一账户没有本地名册：users.json 只管旧用户，平台用户的「存在」写在
+// dataDir/users/<uuid>/ 这份数据上。所以这里要三处取并集：已建的 workspace
+// （本次进程见过的人）、users.json（迁移通道）、磁盘目录（重启前来过的平台用户）。
+// 少了磁盘那份，凌晨重启后没人访问过的平台用户当天就收不到 07:00 简报。
 func (r *registry) allUIDs() []string {
-	if r.users == nil {
+	if r.users == nil && !r.platform {
 		return []string{defaultUserID}
 	}
-	uids := make([]string, 0, len(r.users.names))
-	for uid := range r.users.names {
+	r.mu.Lock()
+	known := make(map[string]struct{}, len(r.m))
+	for uid := range r.m {
+		known[uid] = struct{}{}
+	}
+	r.mu.Unlock()
+	if r.users != nil {
+		for uid := range r.users.names {
+			known[uid] = struct{}{}
+		}
+	}
+	if r.platform {
+		for _, uid := range r.platformUIDsOnDisk() {
+			known[uid] = struct{}{}
+		}
+	}
+	uids := make([]string, 0, len(known))
+	for uid := range known {
 		uids = append(uids, uid)
+	}
+	return uids
+}
+
+// platformUIDsOnDisk 把 dataDir/users/ 下的规范 UUID 目录当成平台用户名册。
+// 目录名是外部来源，所以用 legalUID 的同一把尺子再量一遍，非 UUID 的目录
+// （旧的 home 等）留给 users.json 那条线，不在这里冒充平台租户。
+//
+// 已知债：账号删除目前只清账户域数据，业务数据的联动删除还没做——所以被删账号
+// 的目录还会留在这里被简报调度扫到。等联动删除落地，这份名册自然收敛。
+func (r *registry) platformUIDsOnDisk() []string {
+	entries, err := os.ReadDir(filepath.Join(r.dataDir, "users"))
+	if err != nil {
+		if !os.IsNotExist(err) { // 目录还没建 = 一个平台用户都没来过，不是错
+			log.Printf("⚠️  扫描平台用户目录失败: %v", err)
+		}
+		return nil
+	}
+	uids := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() && canonicalUUID(e.Name()) {
+			uids = append(uids, e.Name())
+		}
 	}
 	return uids
 }

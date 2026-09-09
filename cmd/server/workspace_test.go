@@ -42,7 +42,7 @@ func (m stubChatModel) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel
 
 func testRegistry(t *testing.T, users *userRegistry) *registry {
 	t.Helper()
-	return newRegistry(t.TempDir(), users, stubEmbedder{}, stubChatModel{})
+	return newRegistry(t.TempDir(), users, false, stubEmbedder{}, stubChatModel{})
 }
 
 func TestRegistry_FailClosed(t *testing.T) {
@@ -65,6 +65,60 @@ func TestRegistry_FailClosed(t *testing.T) {
 	// 合法 uid → 正常构建。
 	if _, err := reg.get(ctx, "wang"); err != nil {
 		t.Errorf("合法 uid 应能构建: %v", err)
+	}
+}
+
+func TestRegistry_AcceptsOnlyCanonicalPlatformUUIDs(t *testing.T) {
+	reg := newRegistry(t.TempDir(), nil, true, stubEmbedder{}, stubChatModel{})
+	if _, err := reg.get(context.Background(), "c733a5d7-7b65-49ac-b6d2-872fd57a4ce6"); err != nil {
+		t.Fatalf("已认证的平台 UUID 应可建 workspace: %v", err)
+	}
+	for _, id := range []string{"home", "../../escape", "C733A5D7-7B65-49AC-B6D2-872FD57A4CE6"} {
+		if _, err := reg.get(context.Background(), id); err == nil {
+			t.Errorf("平台模式不应接受非规范 ID %q", id)
+		}
+	}
+}
+
+// 平台用户没有 users.json 那样的本地名册，重启后名册只剩磁盘目录一份。
+// 这个测试盯住的是「凌晨重启 → 07:00 简报漏人」这条链路。
+func TestRegistry_PlatformRosterSurvivesRestart(t *testing.T) {
+	const alive = "c733a5d7-7b65-49ac-b6d2-872fd57a4ce6"
+	dataDir := t.TempDir()
+	for _, name := range []string{alive, "C733A5D7-7B65-49AC-B6D2-872FD57A4CE7", "home", "not-a-uuid"} {
+		if err := os.MkdirAll(filepath.Join(dataDir, "users", name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "users", "stray.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	reg := newRegistry(dataDir, nil, true, stubEmbedder{}, stubChatModel{}) // 全新进程：注册表是空的
+	got := map[string]bool{}
+	for _, uid := range reg.allUIDs() {
+		got[uid] = true
+	}
+	if !got[alive] {
+		t.Errorf("重启后应从磁盘认出平台用户 %s，得到 %v", alive, reg.allUIDs())
+	}
+	if len(got) != 1 {
+		t.Errorf("只有规范 UUID 目录算平台用户，得到 %v", reg.allUIDs())
+	}
+
+	// 旧用户那条线仍走 users.json，不因平台模式而丢。
+	p := writeUsersFile(t, `[{"id":"wang","name":"老王家","token_sha256":["`+hashToken("t")+`"]}]`)
+	users, err := loadUsers(p, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mixed := newRegistry(dataDir, users, true, stubEmbedder{}, stubChatModel{})
+	got = map[string]bool{}
+	for _, uid := range mixed.allUIDs() {
+		got[uid] = true
+	}
+	if !got[alive] || !got["wang"] || len(got) != 2 {
+		t.Errorf("平台用户与旧用户应取并集，得到 %v", mixed.allUIDs())
 	}
 }
 

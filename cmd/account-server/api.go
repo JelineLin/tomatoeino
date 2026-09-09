@@ -83,6 +83,7 @@ func (s *server) handleMe(w http.ResponseWriter, r *http.Request) {
 			s.handleAccountError(w, err)
 			return
 		}
+		w.Header().Set("Cache-Control", "no-store")
 		writeJSON(w, http.StatusOK, session.User)
 	case http.MethodDelete:
 		job, err := s.account.RequestDeletion(r.Context(), bearerToken(r))

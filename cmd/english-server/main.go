@@ -59,6 +59,15 @@ func runServer() error {
 	if err != nil {
 		return fmt.Errorf("加载用户失败: %w", err)
 	}
+	accountAuth, err := newAccountResolver(os.Getenv("ACCOUNT_BASE_URL"), "english")
+	if err != nil {
+		return fmt.Errorf("创建统一账户客户端失败: %w", err)
+	}
+	if users == nil && accountAuth == nil {
+		log.Printf("⚠️  English Coach 未配置鉴权，仅可用于本地开发")
+	} else {
+		log.Printf("English Coach 鉴权就绪：统一账户=%t，旧 token 迁移通道=%t", accountAuth != nil, users != nil)
+	}
 	s := &server{store: store, generator: planner, coach: planner, speech: english.NewSpeechRecognizerFromEnv(), audioDir: envOr("ENGLISH_AUDIO_DIR", "data/english/audio")}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "ok") })
@@ -73,7 +82,7 @@ func runServer() error {
 	mux.HandleFunc("/api/english/profile", s.handleProfile)
 	mux.HandleFunc("/api/english/generate-today", s.handleGenerateToday)
 	mux.Handle("/", spaHandler(envOr("ENGLISH_WEB_DIR", filepath.Join("english-web", "out"))))
-	httpServer := &http.Server{Addr: ":" + envOr("ENGLISH_PORT", "8450"), Handler: withCORS(withAuth(users, mux)), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 12 * time.Minute, WriteTimeout: 12 * time.Minute, IdleTimeout: 90 * time.Second}
+	httpServer := &http.Server{Addr: ":" + envOr("ENGLISH_PORT", "8450"), Handler: withCORS(withAuth(users, accountAuth, mux)), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 12 * time.Minute, WriteTimeout: 12 * time.Minute, IdleTimeout: 90 * time.Second}
 	sigctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go func() {

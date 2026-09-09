@@ -14,6 +14,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -21,6 +22,8 @@ import (
 	"net/http"
 	"os"
 	"strings"
+
+	"tomato-platform/internal/platformauth"
 )
 
 // defaultUserID 是单用户降级模式下的固定身份，也是现有数据迁移的归属。
@@ -37,6 +40,28 @@ type userRecord struct {
 type userRegistry struct {
 	byHash map[string]string // sha256(token) 的 hex → userID
 	names  map[string]string // userID → 展示名（日志用）
+}
+
+// accountIdentityResolver 由统一 account-server 客户端实现。接口放在产品侧，
+// 方便中间件离线测试，也让业务服务不接触平台 token 的签名密钥。
+type accountIdentityResolver interface {
+	Resolve(context.Context, string) (string, error)
+}
+
+// newAccountResolver 按 ACCOUNT_BASE_URL 决定是否启用统一账户；没配就是接口零值。
+//
+// 返回类型必须是接口而不是 *platformauth.Client：一个 nil 的具体指针塞进接口后，
+// 接口本身不等于 nil。withAuth 会据此以为账户服务在线，然后在第一个 token 校验上
+// 空指针崩掉——也就是「没配统一账户的老部署，一个错 token 就打崩一次请求」。
+func newAccountResolver(baseURL, productCode string) (accountIdentityResolver, error) {
+	if strings.TrimSpace(baseURL) == "" {
+		return nil, nil
+	}
+	client, err := platformauth.NewClient(baseURL, productCode, nil)
+	if err != nil {
+		return nil, err
+	}
+	return client, nil
 }
 
 // loadUsers 按三级降级构造注册表。

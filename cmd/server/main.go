@@ -38,6 +38,7 @@ import (
 
 	"tomato-platform/internal/llm"
 	"tomato-platform/internal/menu"
+	"tomato-platform/internal/platformauth"
 )
 
 // server 持有 workspace 注册表——每个用户一整套 agent/账本/会话/简报，
@@ -54,15 +55,23 @@ type server struct {
 func main() {
 	ctx0 := context.Background()
 
-	// 1. 鉴权：token → userID（三级降级见 users.go）。
+	// 1. 鉴权：统一账户优先承接新用户，users.json / API_TOKEN 保留为迁移通道。
 	users, err := loadUsers(envOr("USERS_PATH", "data/users.json"), os.Getenv("API_TOKEN"))
 	if err != nil {
 		log.Fatalf("加载用户注册表失败: %v", err)
 	}
-	if users == nil {
+	accountAuth, err := newAccountResolver(os.Getenv("ACCOUNT_BASE_URL"), "menu")
+	if err != nil {
+		log.Fatalf("创建统一账户客户端失败: %v", err)
+	}
+	if users == nil && accountAuth == nil {
 		log.Printf("⚠️  无 users.json 且未设 API_TOKEN，/api/* 无鉴权——切勿暴露公网！所有请求视为用户 %s", defaultUserID)
 	} else {
-		log.Printf("鉴权就绪：%d 个用户、%d 把钥匙", len(users.names), len(users.byHash))
+		legacyUsers, legacyTokens := 0, 0
+		if users != nil {
+			legacyUsers, legacyTokens = len(users.names), len(users.byHash)
+		}
+		log.Printf("鉴权就绪：统一账户=%t，旧用户=%d，旧钥匙=%d", accountAuth != nil, legacyUsers, legacyTokens)
 	}
 
 	// 2. 进程级共享的重资源：embedder + chat client 只建一份，注入给所有 workspace。
@@ -84,7 +93,7 @@ func main() {
 
 	// 3. workspace 注册表：数据在 DATA_DIR/users/<uid>/ 下，按需懒构建。
 	//    进程启动不再等全量 embed——毫秒级起服，谁来了建谁的。
-	reg := newRegistry(envOr("DATA_DIR", "data"), users, embedder, cm)
+	reg := newRegistry(envOr("DATA_DIR", "data"), users, accountAuth != nil, embedder, cm)
 	srv := &server{reg: reg, vision: vision, chat: cm}
 
 	// 会话清扫：全局 ticker 遍历所有已建 workspace。goroutine 随进程退出。
@@ -138,7 +147,7 @@ func main() {
 
 	httpServer := &http.Server{
 		Addr:    ":" + envOr("PORT", "8080"),
-		Handler: withCORS(withAuth(users, mux)),
+		Handler: withCORS(withAuth(users, accountAuth, mux)),
 		// 只限「读完请求头」的时间，挡掉 slowloris（把连接吊着迟迟不发完头）。
 		// 故意不设 WriteTimeout——SSE 是长连接，设了会把正常的流式回答拦腰截断。
 		ReadHeaderTimeout: 10 * time.Second,
@@ -1272,18 +1281,38 @@ func withCORS(next http.Handler) http.Handler {
 // withAuth 把 token 解析成 userID 塞进请求 ctx——租户边界的入口（评审定稿：
 // 一次解析、全程隐式，下游 handler/工具对多租户零感知）。
 // users 为 nil 时是无鉴权本地模式：放行并把所有请求视为默认用户。
-func withAuth(users *userRegistry, next http.Handler) http.Handler {
+func withAuth(users *userRegistry, accounts accountIdentityResolver, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.URL.Path, "/api/") {
 			next.ServeHTTP(w, r)
 			return
 		}
 		uid := defaultUserID
-		if users != nil {
-			var ok bool
-			uid, ok = users.resolve(r.Header.Get("Authorization"))
-			if !ok {
-				http.Error(w, "未授权：请求需携带 Authorization: Bearer <token>", http.StatusUnauthorized)
+		if users != nil || accounts != nil {
+			authorization := r.Header.Get("Authorization")
+			legacyID, legacyOK := "", false
+			if users != nil {
+				legacyID, legacyOK = users.resolve(authorization)
+			}
+			if legacyOK {
+				uid = legacyID
+			} else if accounts != nil {
+				var err error
+				uid, err = accounts.Resolve(r.Context(), authorization)
+				switch {
+				case err == nil:
+				case errors.Is(err, platformauth.ErrForbidden):
+					http.Error(w, "当前账户未开通或已停用幼儿备餐产品", http.StatusForbidden)
+					return
+				case errors.Is(err, platformauth.ErrUnavailable):
+					http.Error(w, "统一账户服务暂时不可用", http.StatusServiceUnavailable)
+					return
+				default:
+					http.Error(w, "未授权：请求需携带有效的 Bearer token", http.StatusUnauthorized)
+					return
+				}
+			} else {
+				http.Error(w, "未授权：请求需携带有效的 Bearer token", http.StatusUnauthorized)
 				return
 			}
 		}

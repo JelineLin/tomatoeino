@@ -18,6 +18,7 @@
 ```
 internal/llm/         连模型的唯一出口：NewChatModel / NewToolCallingChatModel / NewEmbedder
 internal/platformdb/  PostgreSQL 连接基础设施（只连库，不自动执行 migration）
+internal/platformauth/ 业务服务通过 account-server 实时校验统一会话与产品权限
 internal/vectorstore/ 从零写的内存向量库（cosine 检索），实现 eino 的 retriever.Retriever
 internal/menu/        备餐 agent 业务核心：领域类型 + 知识库 + 工具 + ReAct 装配
 cmd/account-server/   统一身份与客户平台入口，默认监听 :8460
@@ -52,10 +53,16 @@ psql "$PLATFORM_DATABASE_URL" -f migrations/postgres/000002_apple_credentials_an
 - `DELETE /v1/me`：立即冻结账号和全部会话，后台逐一撤销 Apple 授权后硬删除账户数据；
 - `/healthz` 与 `/readyz`：进程和 PostgreSQL 就绪探针。
 
+配置 `ACCOUNT_BASE_URL` 后，Menu Agent 与 English Coach 都接受平台 Access Token：业务请求
+实时调用 `GET /v1/me` 校验会话，并分别要求 `menu` / `english` 产品权限。登出、冻结或删除
+账号会立即阻断后续业务请求；原有 `users.json` / `API_TOKEN` 暂时保留为旧数据迁移通道。
+平台用户没有本地名册，`DATA_DIR/users/<uuid>/` 这份数据本身就是名册——每日简报和启动预热
+按它逐户执行，重启后当天没来过的平台用户照样收得到早简报。
+
 平台 Refresh Token 只把 SHA-256 摘要写入 PostgreSQL，原文只在签发响应中返回。Apple
 refresh token 使用 AES-256-GCM 加密，并绑定 Apple subject 与 Client ID；账号删除任务采用
 数据库租约和退避重试，Apple 撤销成功后才删除账户域数据。Menu Agent / English Coach
-业务数据删除、旧 `API_TOKEN` 用户映射和客户端登录界面仍属于后续阶段，因此当前版本还不能上架。
+业务数据迁移与联动删除、旧 `API_TOKEN` 用户映射和客户端登录界面仍属于后续阶段，因此当前版本还不能上架。
 
 若两个 App 要自然识别为同一 Apple 用户，需要在 Apple Developer 后台将两个 App ID 配置到
 同一个 Sign in with Apple primary app / app group；不能用邮箱（包括私密转发邮箱）猜测合并账户。

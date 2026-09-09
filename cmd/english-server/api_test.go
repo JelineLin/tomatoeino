@@ -12,7 +12,15 @@ import (
 	"testing"
 
 	"tomato-platform/internal/english"
+	"tomato-platform/internal/platformauth"
 )
+
+type fakeAccountResolver struct {
+	id  string
+	err error
+}
+
+func (f fakeAccountResolver) Resolve(context.Context, string) (string, error) { return f.id, f.err }
 
 func TestAudioExtUsesMagicNotClientName(t *testing.T) {
 	cases := []struct {
@@ -50,7 +58,7 @@ func TestSPAHandlerCannotEscapeWebRoot(t *testing.T) {
 
 func TestAuthSeparatesEnglishAPIFromHealth(t *testing.T) {
 	reg := &userRegistry{byHash: map[string]string{hashToken("secret"): "alice"}, names: map[string]string{"alice": "A"}}
-	h := withAuth(reg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := withAuth(reg, nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/healthz" && userIDFrom(r) != "alice" {
 			t.Errorf("身份未注入")
 		}
@@ -74,6 +82,39 @@ func TestAuthSeparatesEnglishAPIFromHealth(t *testing.T) {
 	h.ServeHTTP(w, req)
 	if w.Code != 204 {
 		t.Fatalf("有效 token=%d", w.Code)
+	}
+}
+
+func TestAuthAcceptsPlatformUserAndChecksMembership(t *testing.T) {
+	const userID = "c733a5d7-7b65-49ac-b6d2-872fd57a4ce6"
+	handler := withAuth(nil, fakeAccountResolver{id: userID}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(userIDFrom(r)))
+	}))
+	request := httptest.NewRequest(http.MethodGet, "/api/english/today", nil)
+	request.Header.Set("Authorization", "Bearer platform-token")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Body.String() != userID {
+		t.Fatalf("response = %d %q", response.Code, response.Body.String())
+	}
+
+	denied := withAuth(nil, fakeAccountResolver{err: platformauth.ErrForbidden}, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("denied membership reached handler")
+	}))
+	response = httptest.NewRecorder()
+	denied.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("inactive membership status = %d", response.Code)
+	}
+
+	// 上游若返回带路径片段的 ID，绝不能让它拼进音频落盘目录。
+	unsafe := withAuth(nil, fakeAccountResolver{id: "../../etc"}, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("unsafe user ID reached handler")
+	}))
+	response = httptest.NewRecorder()
+	unsafe.ServeHTTP(response, request)
+	if response.Code != http.StatusBadGateway {
+		t.Fatalf("unsafe user ID status = %d", response.Code)
 	}
 }
 
@@ -169,5 +210,34 @@ func TestHandleAnswersPostReturnsReviewWithoutChangingPublicLesson(t *testing.T)
 	}
 	if public.Questions[0].Answer != "" || public.Questions[0].Explain != "" {
 		t.Fatalf("课程 API 泄露答案: %+v", public.Questions[0])
+	}
+}
+
+// 与 Menu 同一个坑：未配置统一账户时必须是接口零值，否则错 token 会打崩请求。
+func TestNewAccountResolverStaysNilInterfaceWhenUnconfigured(t *testing.T) {
+	resolver, err := newAccountResolver("  ", "english")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolver != nil {
+		t.Fatalf("未配置统一账户时应是接口零值，得到 %#v", resolver)
+	}
+	if configured, err := newAccountResolver("http://127.0.0.1:8460", "english"); err != nil || configured == nil {
+		t.Fatalf("配置后应返回可用解析器: %v", err)
+	}
+	if _, err := newAccountResolver("not-a-url", "english"); err == nil {
+		t.Error("非法 ACCOUNT_BASE_URL 应在启动时报错")
+	}
+
+	users := &userRegistry{byHash: map[string]string{hashToken("secret"): "alice"}, names: map[string]string{"alice": "A"}}
+	handler := withAuth(users, resolver, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("错 token 不该进 handler")
+	}))
+	request := httptest.NewRequest(http.MethodGet, "/api/english/today", nil)
+	request.Header.Set("Authorization", "Bearer wrong-token")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("老部署的错 token 应 401，得到 %d", response.Code)
 	}
 }
