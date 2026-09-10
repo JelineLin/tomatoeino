@@ -43,7 +43,7 @@ func main() {
 
 func runServer() error {
 	ctx := context.Background()
-	store, err := english.OpenStore(envOr("ENGLISH_DB_PATH", "data/english/learning.db"))
+	store, err := openEnglishStore(ctx)
 	if err != nil {
 		return err
 	}
@@ -72,6 +72,15 @@ func runServer() error {
 	s := &server{store: store, generator: planner, coach: planner, speech: english.NewSpeechRecognizerFromEnv(), audioDir: envOr("ENGLISH_AUDIO_DIR", "data/english/audio")}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "ok") })
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		if err := store.Ready(ctx); err != nil {
+			http.Error(w, "not ready", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = io.WriteString(w, "ok")
+	})
 	mux.HandleFunc("/api/english/today", s.handleToday)
 	mux.HandleFunc("/api/english/lessons", s.handleLessons)
 	mux.HandleFunc("/api/english/lessons/", s.handleLesson)
@@ -107,6 +116,19 @@ func runServer() error {
 	shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return httpServer.Shutdown(shutdown)
+}
+
+func openEnglishStore(ctx context.Context) (*english.Store, error) {
+	if databaseURL := strings.TrimSpace(os.Getenv("ENGLISH_DATABASE_URL")); databaseURL != "" {
+		store, err := english.OpenPostgresStore(ctx, databaseURL)
+		if err != nil {
+			return nil, err
+		}
+		log.Printf("English Coach 存储：PostgreSQL english schema")
+		return store, nil
+	}
+	log.Printf("English Coach 存储：本地 SQLite（配置 ENGLISH_DATABASE_URL 后切换 PostgreSQL）")
+	return english.OpenStore(envOr("ENGLISH_DB_PATH", "data/english/learning.db"))
 }
 
 func envOr(k, v string) string {

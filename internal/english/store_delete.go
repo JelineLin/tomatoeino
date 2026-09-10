@@ -40,7 +40,7 @@ func (s *Store) DeleteUser(ctx context.Context, userID string) error {
 
 	for _, table := range userScopedTables {
 		// 表名来自上面的常量列表，不来自任何外部输入；user_id 仍走参数绑定。
-		if _, err := tx.ExecContext(ctx, "DELETE FROM "+table+" WHERE user_id = ?", userID); err != nil {
+		if _, err := s.txExec(ctx, tx, "DELETE FROM "+table+" WHERE user_id = ?", userID); err != nil {
 			return fmt.Errorf("清除 %s 中的用户数据失败: %w", table, err)
 		}
 	}
@@ -54,7 +54,7 @@ func (s *Store) DeleteUser(ctx context.Context, userID string) error {
 // 正常情况下录音都在 audioDir/<uid>/ 下，删目录即可；这个列表用来发现
 // 历史遗留在别处的文件，避免「库里没了、文件还躺在磁盘上」。
 func (s *Store) AudioPathsFor(ctx context.Context, userID string) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.queryRows(ctx,
 		`SELECT audio_path FROM speaking_attempts WHERE user_id = ? AND audio_path <> ''`, userID)
 	if err != nil {
 		return nil, fmt.Errorf("查询用户录音路径失败: %w", err)

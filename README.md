@@ -25,8 +25,9 @@ internal/menu/        备餐 agent 业务核心：领域类型 + 知识库 + 工
 cmd/account-server/   统一身份与客户平台入口，默认监听 :8460
 cmd/server/           HTTP 后端：SSE 流式 /api/chat + REST /api/history + /healthz
 cmd/menu-data-migrate/ 把指定旧用户的 Menu JSON 显式迁移到平台 UUID
-internal/english/     英语课程、SQLite 学习账本、进度规则、转写对齐与模型生成
+internal/english/     英语课程、PostgreSQL/SQLite 学习账本、进度规则、转写对齐与模型生成
 cmd/english-server/   独立 English Coach API / generate-today 命令，默认监听 :8450
+cmd/english-data-migrate/ 把指定旧用户的 English SQLite 数据显式迁移到平台 UUID
 english-web/          独立 Next.js 静态前端（今日课程、朗读、历史、趋势、周报、档案）
 desktop/              Wails macOS 桌面壳（内嵌 Web UI，安全代理到同一个 English 后端）
 examples/02_menu_agent/  同一个 agent 的命令行版 demo
@@ -45,6 +46,7 @@ migrations/postgres/  PostgreSQL 版本化 migration（生产环境由开发者�
 psql "$PLATFORM_DATABASE_URL" -f migrations/postgres/000001_account.up.sql
 psql "$PLATFORM_DATABASE_URL" -f migrations/postgres/000002_apple_credentials_and_deletion.up.sql
 psql "$PLATFORM_DATABASE_URL" -f migrations/postgres/000003_menu_business_data.up.sql
+psql "$PLATFORM_DATABASE_URL" -f migrations/postgres/000004_english_business_data.up.sql
 ```
 
 当前 `account-server` 已提供：
@@ -85,6 +87,24 @@ go run ./cmd/menu-data-migrate \
 
 切换顺序是：手动应用 `000003` → 逐户运行迁移工具并核对 → 配置 `MENU_DATABASE_URL`
 并重启 Menu 服务。不要先启用数据库再迁移，否则旧 UUID 目录会暂时显示成空账户。
+
+English Coach 的生产数据使用同一 database 下独立的 `english` schema，九张表覆盖学习档案、
+课程、阅读/口语尝试、弱项、周报、计划版本和定时任务。旧 token 阶段的 `home` 等标识仍可
+短期共存，所以 `english.user_id` 保留为文本；规范 UUID 会同时生成外键关联 `account.users`，
+在产品清除接口之外提供最终级联兜底。仍不能绕开清除链直接删账号，因为录音文件也要由
+English 服务删除。迁移旧 SQLite 时先停止 English Web 与定时生成任务，
+再逐户执行（工具只读源库、不会覆盖目标已有数据、不会删除源文件）：
+
+```bash
+go run ./cmd/english-data-migrate \
+  --source-db data/english/learning.db \
+  --source-user home \
+  --user-id c733a5d7-7b65-49ac-b6d2-872fd57a4ce6
+```
+
+切换顺序是：手动应用 `000004` → 停止 English 写入 → 逐户迁移并核对 → 配置
+`ENGLISH_DATABASE_URL` → 重启 Web 与定时任务并检查 `/readyz`。课程和口语记录会在目标库
+重建主键，并同步重映射阅读记录、口语记录和单词结果的外键，避免与目标库已有序列冲突。
 
 平台 Refresh Token 只把 SHA-256 摘要写入 PostgreSQL，原文只在签发响应中返回。Apple
 refresh token 使用 AES-256-GCM 加密，并绑定 Apple subject 与 Client ID；账号删除任务采用
@@ -147,7 +167,8 @@ open ios/MenuAgent/MenuAgent.xcodeproj
 ### 4. English Coach（独立实例）
 
 English Coach 复用 `.env` 中的 Key 和 Base URL，但通过 `ENGLISH_OPENAI_MODEL`
-固定自己的文本模型；SQLite、录音、提示词、前端和端口均不与 menuagent 共用。
+固定自己的文本模型；业务表位于独立的 `english` schema，录音、提示词、前端和端口均不与
+Menu Agent 共用。本地开发仍可不配 `ENGLISH_DATABASE_URL`，回退到 SQLite。
 朗读上传会通过 `ffprobe` 校验真实时长，并用 `ffmpeg` 转成 16kHz 单声道 WAV，
 因此部署主机需要安装 ffmpeg（未安装时录音仍会保存，但本次评测返回降级状态）。
 

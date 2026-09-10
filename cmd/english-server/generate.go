@@ -18,7 +18,7 @@ func runGenerateToday(ctx context.Context) error {
 	if now.Weekday() == time.Saturday || now.Weekday() == time.Sunday {
 		return nil
 	}
-	store, err := english.OpenStore(envOr("ENGLISH_DB_PATH", "data/english/learning.db"))
+	store, err := openEnglishStore(ctx)
 	if err != nil {
 		return err
 	}
