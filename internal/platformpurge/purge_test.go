@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"tomato-platform/internal/observability"
 )
 
 const testUserID = "c733a5d7-7b65-49ac-b6d2-872fd57a4ce6"
@@ -13,7 +15,10 @@ const testUserID = "c733a5d7-7b65-49ac-b6d2-872fd57a4ce6"
 // 删除链的两端接在一起跑一遍：account-server 发起 → 产品服务承接 → 数据被清掉。
 func TestClientAndHandlerAgreeOnTheWire(t *testing.T) {
 	var purged []string
-	handler, err := Handler("shared-secret", func(_ context.Context, userID string) error {
+	handler, err := Handler("shared-secret", func(ctx context.Context, userID string) error {
+		if observability.RequestID(ctx) != "delete-request-1" {
+			t.Fatalf("清除请求没有继承 request ID")
+		}
 		purged = append(purged, userID)
 		return nil
 	})
@@ -22,14 +27,15 @@ func TestClientAndHandlerAgreeOnTheWire(t *testing.T) {
 	}
 	mux := http.NewServeMux()
 	mux.Handle(Path, handler)
-	product := httptest.NewServer(mux)
+	product := httptest.NewServer(observability.HTTPMiddleware(mux))
 	defer product.Close()
 
 	client, err := NewClient("menu", product.URL, "shared-secret", product.Client())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := client.Purge(context.Background(), testUserID); err != nil {
+	ctx := observability.WithRequestID(context.Background(), "delete-request-1")
+	if err := client.Purge(ctx, testUserID); err != nil {
 		t.Fatalf("Purge() = %v", err)
 	}
 	if len(purged) != 1 || purged[0] != testUserID {
@@ -37,7 +43,7 @@ func TestClientAndHandlerAgreeOnTheWire(t *testing.T) {
 	}
 
 	// 重试必须能安全地再打一次：幂等由产品侧保证，客户端不做去重。
-	if err := client.Purge(context.Background(), testUserID); err != nil {
+	if err := client.Purge(ctx, testUserID); err != nil {
 		t.Fatalf("重试 Purge() = %v", err)
 	}
 	if len(purged) != 2 {

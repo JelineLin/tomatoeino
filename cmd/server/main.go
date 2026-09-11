@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -38,6 +39,7 @@ import (
 
 	"tomato-platform/internal/llm"
 	"tomato-platform/internal/menu"
+	"tomato-platform/internal/observability"
 	"tomato-platform/internal/platformauth"
 	"tomato-platform/internal/platformdb"
 	"tomato-platform/internal/platformpurge"
@@ -56,6 +58,7 @@ type server struct {
 }
 
 func main() {
+	observability.Configure("menu-server")
 	ctx0 := context.Background()
 
 	// 1. 鉴权：统一账户优先承接新用户，users.json / API_TOKEN 保留为迁移通道。
@@ -164,8 +167,8 @@ func main() {
 	// 账号删除的联动清除：account-server 硬删除账户前，用共享密钥调这里把这户的
 	// 备餐数据整个清掉。走 /internal/ 而不是 /api/——它认的是进程间密钥，不是用户会话。
 	// 没配 PLATFORM_INTERNAL_TOKEN 就干脆不挂载：宁可 404，也不留一个无密码的删除入口。
-	if purgeHandler, err := platformpurge.Handler(os.Getenv("PLATFORM_INTERNAL_TOKEN"), func(_ context.Context, uid string) error {
-		return reg.purge(uid)
+	if purgeHandler, err := platformpurge.Handler(os.Getenv("PLATFORM_INTERNAL_TOKEN"), func(ctx context.Context, uid string) error {
+		return reg.purgeContext(ctx, uid)
 	}); err == nil {
 		mux.Handle(platformpurge.Path, purgeHandler)
 		log.Printf("🗑️  账号删除联动清除接口已挂载：%s", platformpurge.Path)
@@ -184,7 +187,7 @@ func main() {
 
 	httpServer := &http.Server{
 		Addr:    ":" + envOr("PORT", "8080"),
-		Handler: withCORS(withAuth(users, accountAuth, mux)),
+		Handler: observability.HTTPMiddleware(withCORS(withAuth(users, accountAuth, mux))),
 		// 只限「读完请求头」的时间，挡掉 slowloris（把连接吊着迟迟不发完头）。
 		// 故意不设 WriteTimeout——SSE 是长连接，设了会把正常的流式回答拦腰截断。
 		ReadHeaderTimeout: 10 * time.Second,
@@ -264,7 +267,7 @@ func (s *server) handleHistory(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	if err := json.NewEncoder(w).Encode(ws.history.Snapshot()); err != nil {
-		log.Printf("/api/history 编码失败: %v", err)
+		slog.ErrorContext(r.Context(), "encode history response failed", "error", err)
 	}
 }
 
@@ -282,7 +285,7 @@ type feedbackRequest struct {
 //
 // 写序照 record_meal：① 历史 JSON（权威，SetDishFeedback/SetFeedback）② 向量索引
 // 同 ID Upsert（派生，让 search_meal_history 立刻反映反馈）。这是历史的第二条直写路径
-//（第一条是聊天里的 record_meal），共用同一个 ws.history / ws.store，不会两套账。
+// （第一条是聊天里的 record_meal），共用同一个 ws.history / ws.store，不会两套账。
 func (s *server) handleFeedback(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "只支持 POST", http.StatusMethodNotAllowed)
@@ -325,13 +328,13 @@ func (s *server) handleFeedback(w http.ResponseWriter, r *http.Request) {
 	// ② 派生视图：按同一把钥匙（date-mealField）Upsert，让语义检索立刻带上反馈。
 	//    失败不阻断——重启会从 JSON 全量重建自愈（和 record_meal 一个兜底口径）。
 	if err := ws.store.Upsert(r.Context(), []*schema.Document{menu.BuildMealDocument(req.Date, req.Meal, m)}); err != nil {
-		log.Printf("/api/history/feedback 向量更新失败（重启自愈）: %v", err)
+		slog.WarnContext(r.Context(), "feedback vector update failed", "error", err)
 	}
 
 	// 回整份历史，前端直接拿去刷新，省一次 GET。
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	if err := json.NewEncoder(w).Encode(ws.history.Snapshot()); err != nil {
-		log.Printf("/api/history/feedback 编码失败: %v", err)
+		slog.ErrorContext(r.Context(), "encode feedback response failed", "error", err)
 	}
 }
 
@@ -410,7 +413,7 @@ func (s *server) handleApplyMeal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := ws.store.Upsert(r.Context(), []*schema.Document{menu.BuildMealDocument(date, req.Meal, stored)}); err != nil {
-		log.Printf("/api/history/apply 向量更新失败（重启自愈）: %v", err)
+		slog.WarnContext(r.Context(), "applied meal vector update failed", "date", date, "meal", req.Meal, "error", err)
 	}
 	// ③ 简报缓存回写：卡片换成实际采纳的版本并标 Applied——家长的编辑不再「看起来没保存」。
 	ws.briefs.markApplied(date, req.Meal, stored)
@@ -426,7 +429,7 @@ func (s *server) handleApplyMeal(w http.ResponseWriter, r *http.Request) {
 	if !replaced {
 		consumed, missed = ws.inv.ConsumeAll(menu.MergeUses(dishes))
 		if len(missed) > 0 {
-			log.Printf("/api/history/apply %s-%s 有 %d 样食材没扣成（账上找不到）: %v", date, req.Meal, len(missed), missed)
+			slog.WarnContext(r.Context(), "inventory deduction incomplete", "date", date, "meal", req.Meal, "missing_count", len(missed))
 		}
 	}
 
@@ -437,7 +440,7 @@ func (s *server) handleApplyMeal(w http.ResponseWriter, r *http.Request) {
 		Consumed: consumed,
 		Missed:   missed,
 	}); err != nil {
-		log.Printf("/api/history/apply 编码失败: %v", err)
+		slog.ErrorContext(r.Context(), "encode applied meal response failed", "error", err)
 	}
 }
 
@@ -486,7 +489,7 @@ func (s *server) handleParseHistory(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	if err := json.NewEncoder(w).Encode(days); err != nil {
-		log.Printf("/api/history/parse 编码失败: %v", err)
+		slog.ErrorContext(r.Context(), "encode parsed history response failed", "error", err)
 	}
 }
 
@@ -534,12 +537,12 @@ func (s *server) handleImportHistory(w http.ResponseWriter, r *http.Request) {
 		docs = append(docs, menu.BuildMealDocument(wm.Date, wm.Field, wm.Meal))
 	}
 	if err := ws.store.Upsert(r.Context(), docs); err != nil {
-		log.Printf("/api/history/import 向量更新失败（重启自愈）: %v", err)
+		slog.WarnContext(r.Context(), "imported history vector update failed", "document_count", len(docs), "error", err)
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	if err := json.NewEncoder(w).Encode(importResult{Added: added, Replaced: replaced, History: ws.history.Snapshot()}); err != nil {
-		log.Printf("/api/history/import 编码失败: %v", err)
+		slog.ErrorContext(r.Context(), "encode history import response failed", "error", err)
 	}
 }
 
@@ -562,13 +565,13 @@ func (s *server) handleSeasonal(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	if err := json.NewEncoder(w).Encode(menu.SeasonFor(time.Month(m))); err != nil {
-		log.Printf("/api/seasonal 编码失败: %v", err)
+		slog.ErrorContext(r.Context(), "encode seasonal response failed", "error", err)
 	}
 }
 
 // inventoryWrite 是库存写操作的请求体：op 决定动作。
 // 用「POST + op 字段」而不是 PUT/DELETE，是为了不动 withCORS 的允许方法集
-//（现在只放行 GET/POST/OPTIONS），也省掉浏览器预检的麻烦。
+// （现在只放行 GET/POST/OPTIONS），也省掉浏览器预检的麻烦。
 type inventoryWrite struct {
 	Op       string  `json:"op"`       // set（设为精确值/新增）| add（累加入库）| add_batch（批量累加）| remove（删除整条）
 	Name     string  `json:"name"`     //
@@ -598,7 +601,7 @@ func (s *server) handleInventory(w http.ResponseWriter, r *http.Request) {
 		// 前端直接照序渲染就是家长最该先看的顺序。
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		if err := json.NewEncoder(w).Encode(ws.inv.ListFresh(r.URL.Query().Get("keyword"))); err != nil {
-			log.Printf("/api/inventory 编码失败: %v", err)
+			slog.ErrorContext(r.Context(), "encode inventory response failed", "error", err)
 		}
 	case http.MethodPost:
 		r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
@@ -649,7 +652,7 @@ func (s *server) handleInventory(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		// 和 GET 同一个形状（带新鲜度）——前端写后直接替换列表，不用为两种响应写两套解码。
 		if err := json.NewEncoder(w).Encode(ws.inv.ListFresh("")); err != nil {
-			log.Printf("/api/inventory 写后编码失败: %v", err)
+			slog.ErrorContext(r.Context(), "encode inventory write response failed", "error", err)
 		}
 	default:
 		http.Error(w, "只支持 GET/POST", http.StatusMethodNotAllowed)
@@ -697,7 +700,7 @@ func (s *server) handleParseOrderImage(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	if err := json.NewEncoder(w).Encode(items); err != nil {
-		log.Printf("/api/inventory/parse-image 编码失败: %v", err)
+		slog.ErrorContext(r.Context(), "encode image inventory parse response failed", "error", err)
 	}
 }
 
@@ -741,7 +744,7 @@ func (s *server) handleParseInventoryText(w http.ResponseWriter, r *http.Request
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	if err := json.NewEncoder(w).Encode(items); err != nil {
-		log.Printf("/api/inventory/parse-text 编码失败: %v", err)
+		slog.ErrorContext(r.Context(), "encode text inventory parse response failed", "error", err)
 	}
 }
 
@@ -769,7 +772,7 @@ func (s *server) handleProfile(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		resp := profileResponse{Profile: p, Rules: menu.BuildPrefRules(ws.history.Snapshot())}
 		if err := json.NewEncoder(w).Encode(resp); err != nil {
-			log.Printf("/api/profile 编码失败: %v", err)
+			slog.ErrorContext(r.Context(), "encode profile response failed", "error", err)
 		}
 	}
 
@@ -799,7 +802,7 @@ func (s *server) handleProfile(w http.ResponseWriter, r *http.Request) {
 // chatRequest 是前端发来的对话体：一串多轮消息（system 由 agent 自己注入，前端不传）。
 //
 // SessionID 是 L2 服务端会话的钥匙：带了且命中，服务端用自己存的全保真历史
-//（含真实工具消息），只取 Messages 里最后一条 user 做本轮输入；
+// （含真实工具消息），只取 Messages 里最后一条 user 做本轮输入；
 // 没带/过期/服务端重启过，则退回 L1 模式用 Messages 全量重建。
 // 客户端**始终全量带 Messages**——这就是降级兜底，连续性不断崖。
 type chatRequest struct {
@@ -884,12 +887,12 @@ func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
 		u := schema.UserMessage(last.Content)
 		input = append(hist, u) // hist 是副本，append 不会写回库里
 		newTurn = []*schema.Message{u}
-		log.Printf("/api/chat：会话 %s 命中（历史 %d 条 + 新输入 1 条）", shortID(sessionID), len(hist))
+		slog.InfoContext(r.Context(), "chat session resumed", "session_id", shortID(sessionID), "history_messages", len(hist))
 	} else {
 		input = toEinoMessages(req.Messages)
 		sessionID = newSessionID()
 		newTurn = input
-		log.Printf("/api/chat：新会话 %s（L1 全量模式，%d 条消息）", shortID(sessionID), len(req.Messages))
+		slog.InfoContext(r.Context(), "chat session created", "session_id", shortID(sessionID), "input_messages", len(req.Messages))
 	}
 
 	// SSE 需要能逐块 flush；拿不到 Flusher 说明这个 ResponseWriter 不支持流式。
@@ -1316,7 +1319,8 @@ func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, "+observability.RequestIDHeader)
+		w.Header().Set("Access-Control-Expose-Headers", observability.RequestIDHeader)
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -1370,7 +1374,12 @@ func withAuth(users *userRegistry, accounts accountIdentityResolver, next http.H
 		// InvokableRun(ctx,...)），一轮对话的所有 🔧 日志由它串成一条链——
 		// 这就是「ctx 贯穿编译图」那节课的低风险落地（丢了只缺日志，不担正确性）。
 		ctx := context.WithValue(r.Context(), ctxKeyUserID{}, uid)
-		ctx = menu.WithTraceID(ctx, shortID(newSessionID()))
+		observability.SetUserID(ctx, uid)
+		traceID := observability.RequestID(ctx)
+		if traceID == "" { // 单元测试或直接调用中间件时仍保留工具链 trace。
+			traceID = newSessionID()
+		}
+		ctx = menu.WithTraceID(ctx, shortID(traceID))
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

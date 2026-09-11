@@ -14,7 +14,8 @@ package menu
 
 import (
 	"context"
-	"log"
+	"fmt"
+	"log/slog"
 )
 
 type traceIDKey struct{}
@@ -34,5 +35,5 @@ func traceIDFrom(ctx context.Context) string {
 
 // toolLog 是所有工具日志的统一出口：🔧 [trace] 工具名(参数)。
 func toolLog(ctx context.Context, format string, args ...any) {
-	log.Printf("🔧 [%s] "+format, append([]any{traceIDFrom(ctx)}, args...)...)
+	slog.InfoContext(ctx, "menu tool", "trace_id", traceIDFrom(ctx), "operation", fmt.Sprintf(format, args...))
 }

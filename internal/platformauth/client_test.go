@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"tomato-platform/internal/observability"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -31,13 +33,17 @@ func TestResolveValidatesSessionAndProduct(t *testing.T) {
 			if request.Header.Get("Authorization") != "Bearer access-token" {
 				t.Fatalf("token was not normalized")
 			}
+			if request.Header.Get(observability.RequestIDHeader) != "request-123" {
+				t.Fatalf("request ID 未传给 account-server")
+			}
 			return response(http.StatusOK, `{"id":"`+userID+`","products":["english","menu"]}`), nil
 		}),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := client.Resolve(context.Background(), "bearer access-token")
+	ctx := observability.WithRequestID(context.Background(), "request-123")
+	got, err := client.Resolve(ctx, "bearer access-token")
 	if err != nil || got != userID {
 		t.Fatalf("Resolve() = %q, %v", got, err)
 	}

@@ -21,6 +21,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"tomato-platform/internal/observability"
 )
 
 // Path 是产品服务挂载清除接口的路径前缀，后面直接跟平台 user UUID。
@@ -88,6 +90,9 @@ func (c *Client) Purge(ctx context.Context, userID string) error {
 		return fmt.Errorf("%w: %s 创建清除请求失败", ErrPurgeFailed, c.product)
 	}
 	request.Header.Set("Authorization", "Bearer "+c.secret)
+	if requestID := observability.RequestID(ctx); requestID != "" {
+		request.Header.Set(observability.RequestIDHeader, requestID)
+	}
 
 	response, err := c.httpClient.Do(request)
 	if err != nil {
@@ -130,6 +135,7 @@ func Handler(secret string, purge func(context.Context, string) error) (http.Han
 			http.Error(w, "user ID 必须是规范 UUID", http.StatusBadRequest)
 			return
 		}
+		observability.SetUserID(r.Context(), userID)
 		if err := purge(r.Context(), userID); err != nil {
 			// 报错就让 account-server 重试；这里绝不能返回 2xx。
 			http.Error(w, "清除失败", http.StatusInternalServerError)

@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"tomato-platform/internal/observability"
 )
 
 func (s *PostgresStore) RequestDeletion(ctx context.Context, userID, sessionID string) (DeletionJob, error) {
@@ -40,11 +42,11 @@ func (s *PostgresStore) RequestDeletion(ctx context.Context, userID, sessionID s
 	if status == "deleting" {
 		var existing DeletionJob
 		err = tx.QueryRow(ctx, `
-			SELECT id::text, user_id::text, status, attempt_count, requested_at
+			SELECT id::text, user_id::text, status, attempt_count, requested_at, request_id
 			FROM account.account_deletion_jobs
 			WHERE user_id = $1 AND status IN ('pending', 'running', 'failed')
 			ORDER BY requested_at DESC LIMIT 1`, userID).
-			Scan(&existing.ID, &existing.UserID, &existing.Status, &existing.AttemptCount, &existing.RequestedAt)
+			Scan(&existing.ID, &existing.UserID, &existing.Status, &existing.AttemptCount, &existing.RequestedAt, &existing.RequestID)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return DeletionJob{}, ErrAccountUnavailable
 		}
@@ -91,16 +93,16 @@ func (s *PostgresStore) RequestDeletion(ctx context.Context, userID, sessionID s
 
 	var job DeletionJob
 	err = tx.QueryRow(ctx, `
-		INSERT INTO account.account_deletion_jobs(user_id)
-		VALUES ($1)
-		RETURNING id::text, user_id::text, status, attempt_count, requested_at`, userID).
-		Scan(&job.ID, &job.UserID, &job.Status, &job.AttemptCount, &job.RequestedAt)
+		INSERT INTO account.account_deletion_jobs(user_id, request_id)
+		VALUES ($1, $2)
+		RETURNING id::text, user_id::text, status, attempt_count, requested_at, request_id`, userID, observability.RequestID(ctx)).
+		Scan(&job.ID, &job.UserID, &job.Status, &job.AttemptCount, &job.RequestedAt, &job.RequestID)
 	if err != nil {
 		return DeletionJob{}, fmt.Errorf("创建账号删除任务失败: %w", err)
 	}
 	if _, err = tx.Exec(ctx, `
-		INSERT INTO audit.security_events(actor_user_id, event_type, target_type, target_id)
-		VALUES ($1, 'account.deletion.requested', 'user', $1::text)`, userID); err != nil {
+		INSERT INTO audit.security_events(actor_user_id, event_type, target_type, target_id, request_id)
+		VALUES ($1, 'account.deletion.requested', 'user', $1::uuid::text, $2)`, userID, observability.RequestID(ctx)); err != nil {
 		return DeletionJob{}, fmt.Errorf("记录账号删除申请审计失败: %w", err)
 	}
 	if err = tx.Commit(ctx); err != nil {
@@ -135,8 +137,8 @@ func (s *PostgresStore) ClaimDeletionJob(ctx context.Context, lockedUntil time.T
 		FROM candidate
 		WHERE job.id = candidate.id
 		RETURNING job.id::text, job.user_id::text, job.status,
-		          job.attempt_count, job.requested_at`, lockedUntil).
-		Scan(&job.ID, &job.UserID, &job.Status, &job.AttemptCount, &job.RequestedAt)
+		          job.attempt_count, job.requested_at, job.request_id`, lockedUntil).
+		Scan(&job.ID, &job.UserID, &job.Status, &job.AttemptCount, &job.RequestedAt, &job.RequestID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return DeletionJob{}, ErrNoDeletionJob
 	}
@@ -215,9 +217,9 @@ func (s *PostgresStore) CompleteDeletion(ctx context.Context, job DeletionJob, n
 		return fmt.Errorf("账号删除任务状态已变化")
 	}
 	if _, err = tx.Exec(ctx, `
-		INSERT INTO audit.security_events(event_type, target_type, target_id, details)
-		VALUES ('account.deletion.completed', 'deletion_job', $1, jsonb_build_object('note', $2::text))`,
-		job.ID, note); err != nil {
+		INSERT INTO audit.security_events(event_type, target_type, target_id, request_id, details)
+		VALUES ('account.deletion.completed', 'deletion_job', $1, $2, jsonb_build_object('note', $3::text))`,
+		job.ID, job.RequestID, note); err != nil {
 		return fmt.Errorf("记录账号删除完成审计失败: %w", err)
 	}
 	if err = tx.Commit(ctx); err != nil {

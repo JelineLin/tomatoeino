@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"tomato-platform/internal/observability"
 )
 
 var (
@@ -72,6 +74,9 @@ func (c *Client) Resolve(ctx context.Context, authorization string) (string, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
+	if requestID := observability.RequestID(ctx); requestID != "" {
+		req.Header.Set(observability.RequestIDHeader, requestID)
+	}
 
 	response, err := c.httpClient.Do(req)
 	if err != nil {

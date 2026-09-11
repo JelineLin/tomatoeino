@@ -7,12 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"regexp"
 	"strings"
 
+	"tomato-platform/internal/observability"
 	"tomato-platform/internal/platformauth"
 )
 
@@ -120,7 +121,7 @@ func withAuth(users *userRegistry, accounts accountIdentityResolver, next http.H
 					// 这个 id 会拼进 audioDir/<id>/… 的落盘路径。上游只会返回规范 UUID，
 					// 但路径拼接的闸门必须守在自己这边——上游哪天变了，这里先炸。
 					if !safeUserID.MatchString(id) {
-						log.Printf("⚠️  account-server 返回了不安全的 user ID %q", id)
+						slog.ErrorContext(r.Context(), "account-server returned unsafe user ID")
 						http.Error(w, "统一账户返回了非法用户标识", http.StatusBadGateway)
 						return
 					}
@@ -141,6 +142,8 @@ func withAuth(users *userRegistry, accounts accountIdentityResolver, next http.H
 				return
 			}
 		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), userKey{}, id)))
+		ctx := context.WithValue(r.Context(), userKey{}, id)
+		observability.SetUserID(ctx, id)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

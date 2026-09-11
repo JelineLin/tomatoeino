@@ -5,7 +5,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,7 +28,7 @@ func (s *server) purgeUser(ctx context.Context, userID string) error {
 		if !ownedRecording(path, userID) {
 			// 库里的路径不该指向不含本人 ID 的地方；真出现了就留着不动，
 			// 让人来看一眼，绝不按一个可疑路径去 rm。
-			log.Printf("⚠️  跳过可疑录音路径 %q（用户 %s）", path, userID)
+			slog.WarnContext(ctx, "unsafe recording path skipped")
 			continue
 		}
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
@@ -38,7 +38,7 @@ func (s *server) purgeUser(ctx context.Context, userID string) error {
 	if err := s.store.DeleteUser(ctx, userID); err != nil {
 		return err
 	}
-	log.Printf("🗑️  已清除用户 %s 的全部英语学习数据（%d 个录音）", userID, len(recordings))
+	slog.InfoContext(ctx, "english user data purged", "recordings", len(recordings))
 	return nil
 }
 

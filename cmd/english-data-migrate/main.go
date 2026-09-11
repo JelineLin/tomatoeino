@@ -14,10 +14,12 @@ import (
 	"github.com/joho/godotenv"
 
 	"tomato-platform/internal/english"
+	"tomato-platform/internal/observability"
 )
 
 func main() {
 	_ = godotenv.Load()
+	observability.Configure("english-data-migrate")
 	var sourcePath, sourceUser, userID string
 	flag.StringVar(&sourcePath, "source-db", envOr("ENGLISH_DB_PATH", "data/english/learning.db"), "旧 English SQLite 文件")
 	flag.StringVar(&sourceUser, "source-user", "home", "SQLite 中的旧 user ID")

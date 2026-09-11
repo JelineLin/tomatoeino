@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 	"time"
+
+	"tomato-platform/internal/observability"
 )
 
 var ErrNoDeletionJob = errors.New("没有待处理的账号删除任务")
@@ -24,6 +26,7 @@ type DeletionJob struct {
 	Status       string            `json:"status"`
 	AttemptCount int               `json:"attempt_count"`
 	RequestedAt  time.Time         `json:"requested_at"`
+	RequestID    string            `json:"-"`
 	Credentials  []AppleCredential `json:"-"`
 }
 
@@ -67,7 +70,7 @@ func (w *DeletionWorker) Run(ctx context.Context) {
 		}
 		handled, err := w.ProcessOne(ctx)
 		if err != nil && !errors.Is(err, context.Canceled) {
-			log.Printf("account deletion worker: %v", err)
+			slog.ErrorContext(ctx, "account deletion worker failed", "error", err)
 		}
 		if handled {
 			timer.Reset(100 * time.Millisecond)
@@ -86,6 +89,9 @@ func (w *DeletionWorker) ProcessOne(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	ctx = observability.WithRequestID(ctx, job.RequestID)
+	observability.SetUserID(ctx, job.UserID)
+	slog.InfoContext(ctx, "account deletion started", "job_id", job.ID, "attempt", job.AttemptCount)
 
 	notes := make([]string, 0, len(job.Credentials)+1)
 	for _, credential := range job.Credentials {
@@ -116,11 +122,13 @@ func (w *DeletionWorker) ProcessOne(ctx context.Context) (bool, error) {
 		if err := purger.Purge(ctx, job.UserID); err != nil {
 			return w.scheduleRetry(ctx, job, now, err)
 		}
+		slog.InfoContext(ctx, "product data purged", "job_id", job.ID, "product", purger.Product())
 	}
 
 	if err := w.store.CompleteDeletion(ctx, job, strings.Join(notes, "; ")); err != nil {
 		return true, err
 	}
+	slog.InfoContext(ctx, "account deletion completed", "job_id", job.ID)
 	return true, nil
 }
 
@@ -132,6 +140,7 @@ func (w *DeletionWorker) scheduleRetry(ctx context.Context, job DeletionJob, now
 	if retryErr := w.store.RetryDeletion(ctx, job, retryAt, message); retryErr != nil {
 		return true, fmt.Errorf("删除任务失败且保存重试状态失败: %v; 原因: %w", retryErr, cause)
 	}
+	slog.WarnContext(ctx, "account deletion scheduled for retry", "job_id", job.ID, "retry_at", retryAt, "error", cause)
 	return true, fmt.Errorf("删除任务将在 %s 重试: %w", retryAt.Format(time.RFC3339), cause)
 }
 

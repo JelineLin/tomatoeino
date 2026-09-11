@@ -8,6 +8,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"tomato-platform/internal/observability"
 )
 
 const loginChallengeTTL = 5 * time.Minute
@@ -135,6 +137,7 @@ func (s *Service) LoginApple(ctx context.Context, in LoginInput) (TokenSet, erro
 	if err != nil {
 		return TokenSet{}, err
 	}
+	observability.SetUserID(ctx, session.User.ID)
 	return s.issue(session, refreshToken, refreshExpiresAt)
 }
 
@@ -152,6 +155,7 @@ func (s *Service) Refresh(ctx context.Context, rawRefreshToken string) (TokenSet
 	if err != nil {
 		return TokenSet{}, err
 	}
+	observability.SetUserID(ctx, session.User.ID)
 	return s.issue(session, newToken, expiresAt)
 }
 
@@ -164,6 +168,7 @@ func (s *Service) Authenticate(ctx context.Context, rawAccessToken string) (User
 	if err != nil {
 		return UserSession{}, err
 	}
+	observability.SetUserID(ctx, user.ID)
 	return UserSession{User: user, SessionID: claims.SessionID}, nil
 }
 
@@ -180,6 +185,7 @@ func (s *Service) RequestDeletion(ctx context.Context, rawAccessToken string) (D
 	if err != nil {
 		return DeletionJob{}, ErrInvalidSession
 	}
+	observability.SetUserID(ctx, claims.Subject)
 	return s.store.RequestDeletion(ctx, claims.Subject, claims.SessionID)
 }
 

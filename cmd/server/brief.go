@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -27,6 +28,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 
 	"tomato-platform/internal/menu"
+	"tomato-platform/internal/observability"
 )
 
 // briefPrompt 是定时任务喂给 agent 的固定指令。
@@ -83,7 +85,7 @@ func (b *briefStore) set(d *dailyBrief) {
 
 // markApplied 把「家长（可能编辑后）采纳了某餐」回写进简报缓存：换上采纳时真正入库的
 // 时间/菜品，并标 Applied——重新拉简报时卡片显示的就是实际采纳的版本，而不是原推荐
-//（否则家长编辑完看到卡片没变，以为「编辑没保存」；重进 App 连已采纳状态都丢）。
+// （否则家长编辑完看到卡片没变，以为「编辑没保存」；重进 App 连已采纳状态都丢）。
 //
 // 克隆换指针，不原地改：get() 交出去的指针可能正被 handleBrief 在锁外序列化，
 // 原地改会数据竞争（和 HistoryStore 的快照纪律同一口径）。
@@ -194,7 +196,8 @@ func generateBrief(ctx context.Context, uid string, ws *workspace) (*dailyBrief,
 // generateBriefWith 按给定 prompt 生成并落存简报——定时任务/refresh 用标准 prompt，
 // 「智能调整」用 adjustBriefPrompt 拼出来的带指令版，落存路径完全一致。
 func generateBriefWith(ctx context.Context, uid string, ws *workspace, prompt string) (*dailyBrief, error) {
-	log.Printf("⏰ [%s] 开始生成今日简报…", uid)
+	ctx = observability.WithUserID(ctx, uid)
+	slog.InfoContext(ctx, "daily brief generation started")
 	// 往 ctx 挂一个菜单收集器：agent 若调 propose_menu，结构化菜单会写进 sink，
 	// Generate 返回后读走随简报下发（复用 trace.go 的 ctx 贯穿机制）。
 	ctx, sink := menu.WithMenuSink(ctx)
@@ -211,7 +214,7 @@ func generateBriefWith(ctx context.Context, uid string, ws *workspace, prompt st
 		GeneratedAt: time.Now().Truncate(time.Second),
 	}
 	ws.briefs.set(d)
-	log.Printf("⏰ [%s] 今日简报已生成（%d 字，结构化菜单：%v）", uid, len([]rune(d.Content)), d.Menu != nil)
+	slog.InfoContext(ctx, "daily brief generation completed", "content_runes", len([]rune(d.Content)), "structured_menu", d.Menu != nil)
 	return d, nil
 }
 
@@ -247,7 +250,7 @@ func (s *server) handleBrief(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
-		writeBriefJSON(w, d)
+		writeBriefJSON(r.Context(), w, d)
 		return
 	}
 
@@ -264,12 +267,12 @@ func (s *server) handleBrief(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
-		writeBriefJSON(w, d)
+		writeBriefJSON(r.Context(), w, d)
 		return
 	}
 
 	if d := ws.briefs.get(); d != nil {
-		writeBriefJSON(w, d) // 可能是昨天的——Date 字段带着，新鲜度让前端自己判断
+		writeBriefJSON(r.Context(), w, d) // 可能是昨天的——Date 字段带着，新鲜度让前端自己判断
 		return
 	}
 	http.Error(w, "还没有简报。等定时任务生成，或用 /api/brief?refresh=1 立即生成。", http.StatusNotFound)
@@ -349,7 +352,7 @@ func (s *server) handleReplaceDish(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	ctx, sink := menu.WithDishSink(ctx)
 	prompt := replaceDishPrompt(mealLabel(req.Meal), oldDish.Name, siblings, req.Instruction)
-	log.Printf("🔁 [%s] 换菜：%s / %s", userIDFrom(r), req.Meal, oldDish.Name)
+	slog.InfoContext(r.Context(), "brief dish replacement started", "meal", req.Meal)
 	msg, err := ws.agent.Generate(ctx, []*schema.Message{schema.UserMessage(prompt)})
 	if err != nil {
 		http.Error(w, "换菜失败："+err.Error(), http.StatusBadGateway)
@@ -372,7 +375,7 @@ func (s *server) handleReplaceDish(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	if err := json.NewEncoder(w).Encode(replaceDishResponse{Dish: *next, Menu: nm, Note: msg.Content}); err != nil {
-		log.Printf("/api/brief/dish 编码失败: %v", err)
+		slog.ErrorContext(r.Context(), "encode dish replacement response failed", "error", err)
 	}
 }
 
@@ -390,10 +393,10 @@ func mealLabel(field string) string {
 	}
 }
 
-func writeBriefJSON(w http.ResponseWriter, d *dailyBrief) {
+func writeBriefJSON(ctx context.Context, w http.ResponseWriter, d *dailyBrief) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	if err := json.NewEncoder(w).Encode(d); err != nil {
-		log.Printf("/api/brief 编码失败: %v", err)
+		slog.ErrorContext(ctx, "encode daily brief response failed", "error", err)
 	}
 }
 

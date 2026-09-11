@@ -9,6 +9,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"tomato-platform/internal/observability"
 )
 
 var (
@@ -71,7 +73,12 @@ func (s *PostgresStore) Ready(ctx context.Context) error {
 	err := s.pool.QueryRow(ctx, `
 		SELECT to_regclass('account.users') IS NOT NULL
 		   AND to_regclass('account.apple_credentials') IS NOT NULL
-		   AND to_regclass('account.account_deletion_jobs') IS NOT NULL`).Scan(&ready)
+		   AND to_regclass('account.account_deletion_jobs') IS NOT NULL
+		   AND EXISTS (
+		       SELECT 1 FROM information_schema.columns
+		       WHERE table_schema = 'account' AND table_name = 'account_deletion_jobs'
+		         AND column_name = 'request_id'
+		   )`).Scan(&ready)
 	if err != nil {
 		return fmt.Errorf("检查账户数据库结构失败: %w", err)
 	}
@@ -203,8 +210,8 @@ func (s *PostgresStore) LoginApple(ctx context.Context, p AppleLoginParams) (Use
 		return UserSession{}, fmt.Errorf("创建平台会话失败: %w", err)
 	}
 	if _, err = tx.Exec(ctx, `
-		INSERT INTO audit.security_events(actor_user_id, event_type, target_type, target_id)
-		VALUES ($1, 'auth.apple.login', 'session', $2)`, user.ID, sessionID); err != nil {
+		INSERT INTO audit.security_events(actor_user_id, event_type, target_type, target_id, request_id)
+		VALUES ($1, 'auth.apple.login', 'session', $2, $3)`, user.ID, sessionID, observability.RequestID(ctx)); err != nil {
 		return UserSession{}, fmt.Errorf("记录登录审计失败: %w", err)
 	}
 	user.Products, err = activeProducts(ctx, tx, user.ID)
@@ -245,8 +252,8 @@ func (s *PostgresStore) RotateSession(ctx context.Context, oldHash, newHash [sha
 		return UserSession{}, err
 	}
 	if _, err = tx.Exec(ctx, `
-		INSERT INTO audit.security_events(actor_user_id, event_type, target_type, target_id)
-		VALUES ($1, 'auth.session.refresh', 'session', $2)`, out.User.ID, out.SessionID); err != nil {
+		INSERT INTO audit.security_events(actor_user_id, event_type, target_type, target_id, request_id)
+		VALUES ($1, 'auth.session.refresh', 'session', $2, $3)`, out.User.ID, out.SessionID, observability.RequestID(ctx)); err != nil {
 		return UserSession{}, fmt.Errorf("记录 token 轮换审计失败: %w", err)
 	}
 	if err = tx.Commit(ctx); err != nil {
@@ -290,8 +297,8 @@ func (s *PostgresStore) RevokeSession(ctx context.Context, userID, sessionID str
 		return ErrInvalidSession
 	}
 	if _, err = tx.Exec(ctx, `
-		INSERT INTO audit.security_events(actor_user_id, event_type, target_type, target_id)
-		VALUES ($1, 'auth.session.logout', 'session', $2)`, userID, sessionID); err != nil {
+		INSERT INTO audit.security_events(actor_user_id, event_type, target_type, target_id, request_id)
+		VALUES ($1, 'auth.session.logout', 'session', $2, $3)`, userID, sessionID, observability.RequestID(ctx)); err != nil {
 		return fmt.Errorf("记录登出审计失败: %w", err)
 	}
 	if err = tx.Commit(ctx); err != nil {

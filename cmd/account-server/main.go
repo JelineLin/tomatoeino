@@ -20,6 +20,7 @@ import (
 	"github.com/joho/godotenv"
 
 	"tomato-platform/internal/account"
+	"tomato-platform/internal/observability"
 	"tomato-platform/internal/platformdb"
 	"tomato-platform/internal/platformpurge"
 )
@@ -39,6 +40,8 @@ type server struct {
 }
 
 func main() {
+	_ = godotenv.Load()
+	observability.Configure("account-server")
 	if err := run(); err != nil {
 		log.Fatal(err)
 	}
@@ -47,8 +50,6 @@ func main() {
 func run() error {
 	// 与现有业务进程保持一致：本地开发可从仓库根目录的 .env 读取，
 	// 已由部署环境导出的变量不会被覆盖。
-	_ = godotenv.Load()
-
 	tokens, err := account.NewTokenManager(os.Getenv("ACCOUNT_TOKEN_SECRET"))
 	if err != nil {
 		return err
@@ -161,13 +162,14 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("/v1/auth/refresh", s.handleRefresh)
 	mux.HandleFunc("/v1/auth/logout", s.handleLogout)
 	mux.HandleFunc("/v1/me", s.handleMe)
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		if strings.HasPrefix(r.URL.Path, "/v1/") {
 			w.Header().Set("Cache-Control", "no-store")
 		}
 		mux.ServeHTTP(w, r)
 	})
+	return observability.HTTPMiddleware(handler)
 }
 
 func (s *server) handleHealth(w http.ResponseWriter, _ *http.Request) {

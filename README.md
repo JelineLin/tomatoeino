@@ -20,6 +20,7 @@ internal/llm/         连模型的唯一出口：NewChatModel / NewToolCallingCh
 internal/platformdb/  PostgreSQL 连接基础设施（只连库，不自动执行 migration）
 internal/platformauth/ 业务服务通过 account-server 实时校验统一会话与产品权限
 internal/platformpurge/ 账号删除的跨进程清除链：账户侧发起、产品侧承接（共用一套语义）
+internal/observability/ 三个后端共用的 JSON 日志、request ID 与 HTTP 访问日志
 internal/vectorstore/ 从零写的内存向量库（cosine 检索），实现 eino 的 retriever.Retriever
 internal/menu/        备餐 agent 业务核心：领域类型 + 知识库 + 工具 + ReAct 装配
 cmd/account-server/   统一身份与客户平台入口，默认监听 :8460
@@ -47,6 +48,7 @@ psql "$PLATFORM_DATABASE_URL" -f migrations/postgres/000001_account.up.sql
 psql "$PLATFORM_DATABASE_URL" -f migrations/postgres/000002_apple_credentials_and_deletion.up.sql
 psql "$PLATFORM_DATABASE_URL" -f migrations/postgres/000003_menu_business_data.up.sql
 psql "$PLATFORM_DATABASE_URL" -f migrations/postgres/000004_english_business_data.up.sql
+psql "$PLATFORM_DATABASE_URL" -f migrations/postgres/000005_observability_context.up.sql
 ```
 
 当前 `account-server` 已提供：
@@ -57,6 +59,14 @@ psql "$PLATFORM_DATABASE_URL" -f migrations/postgres/000004_english_business_dat
 - `GET /v1/me` 与 `POST /v1/auth/logout`：查询统一身份和撤销设备会话；
 - `DELETE /v1/me`：立即冻结账号和全部会话，后台撤销 Apple 授权、清除各产品业务数据，最后硬删除账户数据；
 - `/healthz` 与 `/readyz`：进程和 PostgreSQL 就绪探针。
+
+三个 HTTP 进程默认输出结构化 JSON 日志。入口会接受合法的 `X-Request-ID` 或生成新的
+128-bit ID，并在响应、Menu/English 到 account-server 的实时鉴权，以及账号删号到产品
+清除请求之间持续传递。访问日志记录 `service/request_id/user_id/method/path/status/duration_ms`
+等字段，不记录 query string、Authorization、请求体、邮箱或原始 IP。账户安全审计表也保存
+同一个 request ID；`000005` 会把删号申请的 ID 固化到后台任务，使 Apple 撤权、产品清除和
+最终硬删除在原 HTTP 请求结束后仍能串成一条链。`LOG_FORMAT=text` 可用于本地阅读，
+`LOG_LEVEL=debug|info|warn|error` 控制级别。
 
 配置 `ACCOUNT_BASE_URL` 后，Menu Agent 与 English Coach 都接受平台 Access Token：业务请求
 实时调用 `GET /v1/me` 校验会话，并分别要求 `menu` / `english` 产品权限。登出、冻结或删除

@@ -16,11 +16,13 @@ import (
 	"github.com/joho/godotenv"
 
 	"tomato-platform/internal/menu"
+	"tomato-platform/internal/observability"
 	"tomato-platform/internal/platformdb"
 )
 
 func main() {
 	_ = godotenv.Load()
+	observability.Configure("menu-data-migrate")
 	var userID, sourceUser, dataDir string
 	flag.StringVar(&userID, "user-id", "", "目标平台用户 UUID（必填）")
 	flag.StringVar(&sourceUser, "source-user", "", "源 JSON 目录名；默认与 user-id 相同，旧数据可填 home")

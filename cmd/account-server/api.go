@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -28,7 +28,7 @@ func (s *server) handleAppleChallenge(w http.ResponseWriter, r *http.Request) {
 	}
 	challenge, err := s.account.NewAppleChallenge(r.Context(), request.ProductCode)
 	if err != nil {
-		s.handleAccountError(w, err)
+		s.handleAccountError(w, r, err)
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
@@ -47,7 +47,7 @@ func (s *server) handleAppleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	tokens, err := s.account.LoginApple(r.Context(), request)
 	if err != nil {
-		s.handleAccountError(w, err)
+		s.handleAccountError(w, r, err)
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
@@ -68,7 +68,7 @@ func (s *server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 	tokens, err := s.account.Refresh(r.Context(), request.RefreshToken)
 	if err != nil {
-		s.handleAccountError(w, err)
+		s.handleAccountError(w, r, err)
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
@@ -80,7 +80,7 @@ func (s *server) handleMe(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		session, err := s.account.Authenticate(r.Context(), bearerToken(r))
 		if err != nil {
-			s.handleAccountError(w, err)
+			s.handleAccountError(w, r, err)
 			return
 		}
 		w.Header().Set("Cache-Control", "no-store")
@@ -88,7 +88,7 @@ func (s *server) handleMe(w http.ResponseWriter, r *http.Request) {
 	case http.MethodDelete:
 		job, err := s.account.RequestDeletion(r.Context(), bearerToken(r))
 		if err != nil {
-			s.handleAccountError(w, err)
+			s.handleAccountError(w, r, err)
 			return
 		}
 		writeJSON(w, http.StatusAccepted, job)
@@ -103,13 +103,13 @@ func (s *server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.account.Logout(r.Context(), bearerToken(r)); err != nil {
-		s.handleAccountError(w, err)
+		s.handleAccountError(w, r, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *server) handleAccountError(w http.ResponseWriter, err error) {
+func (s *server) handleAccountError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, account.ErrInvalidInput):
 		writeAPIError(w, http.StatusBadRequest, "invalid_request", "请求参数不正确")
@@ -120,7 +120,7 @@ func (s *server) handleAccountError(w http.ResponseWriter, err error) {
 	case account.IsAuthenticationError(err):
 		writeAPIError(w, http.StatusUnauthorized, "invalid_credentials", "登录凭证或会话无效")
 	default:
-		log.Printf("account API error: %v", err)
+		slog.ErrorContext(r.Context(), "account API failed", "error", err)
 		writeAPIError(w, http.StatusInternalServerError, "internal_error", "服务暂时不可用")
 	}
 }

@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -29,6 +30,7 @@ import (
 	"github.com/google/uuid"
 
 	"tomato-platform/internal/menu"
+	"tomato-platform/internal/observability"
 	"tomato-platform/internal/vectorstore"
 )
 
@@ -37,9 +39,9 @@ type workspace struct {
 	agent    *react.Agent
 	history  *menu.HistoryStore
 	inv      *menu.InventoryStore
-	profile  *menu.ProfileStore   // 宝宝档案：动态注入该户 agent 的人设
-	store    *vectorstore.Store   // 该户内存向量库：界面直写历史后按同 ID Upsert 更新语义索引
-	sessions *sessionStore        // L2 会话下沉到 workspace = 天然按用户隔离
+	profile  *menu.ProfileStore // 宝宝档案：动态注入该户 agent 的人设
+	store    *vectorstore.Store // 该户内存向量库：界面直写历史后按同 ID Upsert 更新语义索引
+	sessions *sessionStore      // L2 会话下沉到 workspace = 天然按用户隔离
 	briefs   *briefStore
 }
 
@@ -174,8 +176,9 @@ func (r *registry) get(ctx context.Context, uid string) (*workspace, error) {
 // build 构建一个用户的 workspace：数据在 dataDir/users/<uid>/ 下，
 // 文件不存在就是空账本（新用户从零起步，record_meal 自举历史）。
 func (r *registry) build(ctx context.Context, uid string) (*workspace, error) {
+	ctx = observability.WithUserID(ctx, uid)
 	dir := filepath.Join(r.dataDir, "users", uid)
-	log.Printf("🏗️  构建用户 %s 的 workspace（%s）…", uid, dir)
+	slog.InfoContext(ctx, "menu workspace build started")
 
 	var asm *menu.Assembly
 	var err error
@@ -194,7 +197,7 @@ func (r *registry) build(ctx context.Context, uid string) (*workspace, error) {
 	if err != nil {
 		return nil, fmt.Errorf("构建用户 %s 的 workspace 失败: %w", uid, err)
 	}
-	log.Printf("🏗️  用户 %s 就绪（历史 %d 天）", uid, len(asm.History.Snapshot()))
+	slog.InfoContext(ctx, "menu workspace ready", "history_days", len(asm.History.Snapshot()))
 	return &workspace{
 		agent:    asm.Agent,
 		history:  asm.History,
@@ -214,6 +217,11 @@ func (r *registry) build(ctx context.Context, uid string) (*workspace, error) {
 // 目录写回来。墓碑只活在本进程内存里，重启后账号在 account-server 那边
 // 早已不存在，token 也就换不到身份，不需要持久化。
 func (r *registry) purge(uid string) error {
+	return r.purgeContext(context.Background(), uid)
+}
+
+func (r *registry) purgeContext(ctx context.Context, uid string) error {
+	ctx = observability.WithUserID(ctx, uid)
 	if !canonicalUUID(uid) {
 		return fmt.Errorf("拒绝清除非规范 UUID %q", uid)
 	}
@@ -231,9 +239,9 @@ func (r *registry) purge(uid string) error {
 		ws.profile.Disable()
 	}
 	if r.repo != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		deleteCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
-		if err := r.repo.DeleteUserData(ctx, uid); err != nil {
+		if err := r.repo.DeleteUserData(deleteCtx, uid); err != nil {
 			return fmt.Errorf("从 PostgreSQL 删除用户 %s 的 Menu 数据失败: %w", uid, err)
 		}
 	}
@@ -242,7 +250,7 @@ func (r *registry) purge(uid string) error {
 	if err := os.RemoveAll(dir); err != nil {
 		return fmt.Errorf("删除用户 %s 的数据目录失败: %w", uid, err)
 	}
-	log.Printf("🗑️  已清除用户 %s 的全部备餐数据（%s）", uid, dir)
+	slog.InfoContext(ctx, "menu user data purged")
 	return nil
 }
 

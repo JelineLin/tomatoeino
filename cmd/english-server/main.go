@@ -1,5 +1,5 @@
 // english-server 是 tomato-platform 的 English Coach 独立进程。
-// 它复用 internal/llm 和同一套 Ark 凭证，但有自己的模型、提示词、SQLite、录音和前端。
+// 它复用 internal/llm 和同一套 Ark 凭证，但有自己的模型、提示词、学习账本、录音和前端。
 package main
 
 import (
@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"tomato-platform/internal/english"
+	"tomato-platform/internal/observability"
 	"tomato-platform/internal/platformpurge"
 )
 
@@ -30,6 +31,7 @@ type server struct {
 }
 
 func main() {
+	observability.Configure("english-server")
 	if len(os.Args) > 1 && os.Args[1] == "generate-today" {
 		if err := runGenerateToday(context.Background()); err != nil {
 			log.Fatal(err)
@@ -102,7 +104,7 @@ func runServer() error {
 	}
 
 	mux.Handle("/", spaHandler(envOr("ENGLISH_WEB_DIR", filepath.Join("english-web", "out"))))
-	httpServer := &http.Server{Addr: ":" + envOr("ENGLISH_PORT", "8450"), Handler: withCORS(withAuth(users, accountAuth, mux)), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 12 * time.Minute, WriteTimeout: 12 * time.Minute, IdleTimeout: 90 * time.Second}
+	httpServer := &http.Server{Addr: ":" + envOr("ENGLISH_PORT", "8450"), Handler: observability.HTTPMiddleware(withCORS(withAuth(users, accountAuth, mux))), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 12 * time.Minute, WriteTimeout: 12 * time.Minute, IdleTimeout: 90 * time.Second}
 	sigctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go func() {
@@ -141,7 +143,8 @@ func envOr(k, v string) string {
 func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, "+observability.RequestIDHeader)
+		w.Header().Set("Access-Control-Expose-Headers", observability.RequestIDHeader)
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
